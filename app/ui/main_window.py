@@ -137,6 +137,8 @@ class LocalLibraryWindow(QMainWindow):
 
         self.library_view.book_selected.connect(self.open_book)
         self.library_view.book_remove_requested.connect(self.remove_book_from_library)
+        self.library_view.add_books_requested.connect(self.import_multiple_files_dialog)
+        self.library_view.import_folders_requested.connect(self.import_multiple_folders_dialog)
         self.reader_view.progress_updated.connect(self.lbl_page_status.setText)
 
         self.show_library_view()

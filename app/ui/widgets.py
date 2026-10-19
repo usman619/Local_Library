@@ -477,10 +477,15 @@ class DocumentCanvasView(QAbstractScrollArea):
     # -----------------------------------------------------------------
     def mousePressEvent(self, event):
         if event.button() == Qt.LeftButton and self.doc:
+            click_pt = event.position().toPoint()
+            # If the user clicked inside the floating SelectionPopupBar, do NOT hide or clear selection!
+            if self.selection_popup.isVisible() and self.selection_popup.geometry().contains(click_pt):
+                super().mousePressEvent(event)
+                return
+
             self.selection_popup.hide()
-            page_idx, pdf_pt = self._viewport_point_to_pdf(event.position().toPoint())
+            page_idx, pdf_pt = self._viewport_point_to_pdf(click_pt)
             if page_idx is not None and pdf_pt is not None:
-                # First check if user clicked an internal reference link
                 if self._check_and_handle_link_click(page_idx, pdf_pt):
                     event.accept()
                     return
@@ -571,7 +576,7 @@ class DocumentCanvasView(QAbstractScrollArea):
             act_copy.triggered.connect(self.copy_selected_text)
             act_note = menu.addAction("Highlight & Add Note...")
             act_note.triggered.connect(self._request_note_from_selection)
-            act_look = menu.addAction("🔍 Lookup Dictionary / Wikipedia / Translate")
+            act_look = menu.addAction("Lookup Dictionary / Wikipedia / Translate")
             act_look.triggered.connect(self._request_lookup_from_selection)
             menu.addSeparator()
             for key, info in HIGHLIGHT_COLORS.items():
@@ -716,26 +721,26 @@ class DocumentCanvasView(QAbstractScrollArea):
             )
             self.clear_selection()
     
-    def _request_note_from_selection(self):
-        if self._sel_page is not None and self._sel_text.strip():
-            page = self._sel_page
-            txt = self._sel_text.strip()
-            rects_copy = [list(r) for r in self._sel_rects_pdf]
-            self.clear_selection()
-            self.note_requested_for_selection.emit(page, txt, rects_copy)
-
     def _request_tts_from_selection(self):
-     if self._sel_page is not None and self._sel_text.strip():
-         page = int(self._sel_page)
-         txt = str(self._sel_text.strip())
-         self.clear_selection()
-         self.tts_requested_at_page.emit(page, txt)
+        if self._sel_page is not None and self._sel_text.strip():
+            page = int(self._sel_page)
+            txt = str(self._sel_text.strip())
+            self.clear_selection()
+            self.tts_requested_at_page.emit(page, txt)
 
     def _request_lookup_from_selection(self):
         if self._sel_text.strip():
-            txt = self._sel_text.strip()
+            txt = str(self._sel_text.strip())
             self.selection_popup.hide()
             self.lookup_requested.emit(txt)
+
+    def _request_note_from_selection(self):
+        if self._sel_page is not None and self._sel_text.strip():
+            page = int(self._sel_page)
+            txt = str(self._sel_text.strip())
+            rects_copy = [list(r) for r in self._sel_rects_pdf]
+            self.clear_selection()
+            self.note_requested_for_selection.emit(page, txt, rects_copy)
 
     def keyPressEvent(self, event):
         if event.type() == QEvent.KeyPress:

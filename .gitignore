@@ -1,5 +1,4 @@
 .mypy_cache
 .vscode
-install_desktop.py
 pyrightconfig.json
 **/__pycache__/

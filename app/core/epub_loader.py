@@ -4,6 +4,7 @@ import struct
 import hashlib
 import zipfile
 from pathlib import Path
+from urllib.parse import unquote
 import pymupdf
 
 from app.config import (
@@ -21,66 +22,128 @@ try:
 except Exception:
     pass
 
-# Usable content box inside an EPUB page (leaving room for captions on the same page)
-MAX_IMG_WIDTH_PT = int(EPUB_PAGE_WIDTH - 84)    # 516pt
-MAX_IMG_HEIGHT_PT = int(EPUB_PAGE_HEIGHT - 220)  # 600pt
+# Safe content box inside an EPUB page (Foliate-style max-inline-size & max-block-size)
+MAX_IMG_WIDTH_PT = int(EPUB_PAGE_WIDTH - 90)     # 510pt
+MAX_IMG_HEIGHT_PT = int(EPUB_PAGE_HEIGHT - 240)  # 580pt
 
-_PAGE_RULE_RE = re.compile(r"@page\s*\{[^}]*\}", re.IGNORECASE | re.DOTALL)
+_CSS_COMMENT_RE = re.compile(r"/\*[\s\S]*?\*/")
 
-# Strip ALL CSS properties that cause MuPDF (muhtml) to miscalculate vertical height
-# of tables, figures, and divs (causing text to overlap on top of tables/diagrams).
-_BROKEN_PROPS_RE = re.compile(
-    r"(\bfloat\s*:\s*[^;\}]+;?"
-    r"|\bclear\s*:\s*[^;\}]+;?"
-    r"|\bposition\s*:\s*[^;\}]+;?"
-    r"|\btop\s*:\s*[^;\}]+;?"
-    r"|\bbottom\s*:\s*[^;\}]+;?"
-    r"|\bleft\s*:\s*[^;\}]+;?"
-    r"|\bright\s*:\s*[^;\}]+;?"
-    r"|\btransform\s*:\s*[^;\}]+;?"
-    r"|\boverflow(?:-[xy])?\s*:\s*[^;\}]+;?"
-    r"|\bdisplay\s*:\s*(?:flex|inline-flex|grid|inline-grid|inline-block|inline-table)[^;\}]+;?"
-    r"|\b(?:min-|max-)?height\s*:\s*[^;\}]+;?"
-    r"|\b(?:min-|max-)?width\s*:\s*[0-9.]+(?:%|vh|vw)[^;\}]+;?"
-    r"|\bmargin(?:-(?:top|bottom|left|right))?\s*:\s*-[0-9.]+[^;\}]+;?"
-    r"|\bline-height\s*:\s*(?:0|[0-9.]+px|[0-9.]+pt)[^;\}]+;?"
-    r"|\bpage-break-[a-z-]+\s*:\s*[^;\}]+;?"
-    r"|\bbreak-[a-z-]+\s*:\s*[^;\}]+;?)",
-    re.IGNORECASE,
-)
+# CSS properties that break vertical block flow and cause tables/diagrams to overlap text in MuPDF
+_BANNED_CSS_PROPS = {
+    "height",
+    "min-height",
+    "max-height",
+    "width",
+    "min-width",
+    "max-width",
+    "block-size",
+    "min-block-size",
+    "max-block-size",
+    "inline-size",
+    "min-inline-size",
+    "max-inline-size",
+    "float",
+    "clear",
+    "position",
+    "top",
+    "bottom",
+    "left",
+    "right",
+    "inset",
+    "display",
+    "visibility",
+    "overflow",
+    "overflow-x",
+    "overflow-y",
+    "clip",
+    "clip-path",
+    "transform",
+    "line-height",
+    "vertical-align",
+    "page-break-before",
+    "page-break-after",
+    "page-break-inside",
+    "break-before",
+    "break-after",
+    "break-inside",
+    "columns",
+    "column-count",
+    "column-width",
+    "flex",
+    "flex-direction",
+    "flex-wrap",
+    "align-items",
+    "justify-content",
+    "grid",
+    "grid-template",
+    "aspect-ratio",
+    "object-fit",
+}
 
-# Unwraps <svg ...><image xlink:href="..."/></svg> into a standard <img> tag
-_SVG_IMAGE_WRAPPER_RE = re.compile(
-    r"<svg[^>]*>[\s\S]*?<image[^>]+(?:xlink:href|href)\s*=\s*([\"'][^\"']+[\"'])[^>]*\/?>[\s\S]*?<\/svg>",
-    re.IGNORECASE,
-)
 
-_IMG_TAG_RE = re.compile(r"<img\b[^>]*>", re.IGNORECASE)
-_SRC_ATTR_RE = re.compile(r'\bsrc\s*=\s*["\']([^"\']+)["\']', re.IGNORECASE)
-_STYLE_ATTR_RE = re.compile(r'\s+style\s*=\s*["\'][^"\']*["\']', re.IGNORECASE)
-_WIDTH_ATTR_RE = re.compile(r'\s+width\s*=\s*["\'][^"\']*["\']', re.IGNORECASE)
-_HEIGHT_ATTR_RE = re.compile(r'\s+height\s*=\s*["\'][^"\']*["\']', re.IGNORECASE)
+def _sanitize_css_declarations(decl_block: str) -> str:
+    """Filters a CSS declaration block (prop: val; ...) removing all flow-breaking properties."""
+    kept = []
+    for part in decl_block.split(";"):
+        part = part.strip()
+        if not part or ":" not in part:
+            continue
+        prop, val = part.split(":", 1)
+        prop_clean = prop.strip().lower()
 
-# Strip inline style="..." on table, tr, td, th, div, figure, p so fixed heights never cause overlap
-_CONTAINER_INLINE_STYLE_RE = re.compile(
-    r"(<(?:table|thead|tbody|tfoot|tr|td|th|figure|figcaption|div|p)\b[^>]*?)\s+style\s*=\s*[\"'][^\"']*[\"']([^>]*>)",
-    re.IGNORECASE,
-)
+        if prop_clean in _BANNED_CSS_PROPS:
+            continue
+        if prop_clean.startswith("margin") or prop_clean.startswith("padding"):
+            continue
+        kept.append(f"{prop.strip()}: {val.strip()}")
+    return "; ".join(kept)
+
+
+def _sanitize_css_text(css_text: str) -> str:
+    """
+    1. Strips all /* ... */ comments (and any trailing unclosed /* comment) FIRST
+       so braces inside comments never cause 'unterminated comment' syntax errors in MuPDF.
+    2. Strips @page rules and sanitizes every { ... } declaration block.
+    """
+    # Strip well-formed /* ... */ comments
+    css_text = _CSS_COMMENT_RE.sub("", css_text)
+    # Strip any stray unclosed /* comment at the end of a broken publisher CSS file
+    if "/*" in css_text:
+        css_text = css_text.split("/*", 1)[0]
+
+    # Remove XML/HTML comment wrappers sometimes left inside <style><!-- ... --></style>
+    css_text = css_text.replace("<!--", "").replace("-->", "")
+
+    # Remove @page rules
+    css_text = re.sub(r"@page\s*[^{]*\{[^}]*\}", "", css_text, flags=re.IGNORECASE | re.DOTALL)
+
+    def _clean_block(match: re.Match) -> str:
+        inner = match.group(1)
+        if "{" in inner:
+            return match.group(0)
+        cleaned = _sanitize_css_declarations(inner)
+        return "{ " + cleaned + " }"
+
+    return re.sub(r"\{([^{}]*)\}", _clean_block, css_text)
+
+
+def _sanitize_css_bytes(raw_css: bytes) -> bytes:
+    text = raw_css.decode("utf-8", errors="ignore")
+    text = _sanitize_css_text(text)
+    text = text + "\n" + EPUB_READER_CSS
+    return text.encode("utf-8")
 
 
 def _get_image_size_reliable(data: bytes, filename: str) -> tuple[int, int] | None:
     """Reliably reads (width, height) for PNG, JPEG, GIF, and WebP images inside an EPUB."""
     if len(data) < 24:
         return None
-    # 1. Fast PNG header check
     if data[:8] == b"\x89PNG\r\n\x1a\n" and data[12:16] == b"IHDR":
         w, h = struct.unpack(">II", data[16:24])
         return int(w), int(h)
-    # 2. Fast GIF header check
     if data[:6] in (b"GIF87a", b"GIF89a"):
         w, h = struct.unpack("<HH", data[6:10])
         return int(w), int(h)
-    # 3. PyMuPDF Pixmap / Document stream for JPEG, WebP, etc.
     try:
         pix = pymupdf.Pixmap(data)
         if pix.width > 0 and pix.height > 0:
@@ -97,22 +160,16 @@ def _get_image_size_reliable(data: bytes, filename: str) -> tuple[int, int] | No
 
 
 def _compute_fitted_dimensions(orig_w: int, orig_h: int) -> tuple[int, int]:
-    """
-    Computes exact (width_pt, height_pt) for an image in MuPDF so it fits cleanly
-    on the page along with its surrounding figure caption and text without overflowing.
-    """
     if orig_w <= 0 or orig_h <= 0:
-        return int(MAX_IMG_WIDTH_PT * 0.85), int(MAX_IMG_HEIGHT_PT * 0.5)
+        return int(MAX_IMG_WIDTH_PT * 0.8), int(MAX_IMG_HEIGHT_PT * 0.45)
 
     w, h = float(orig_w), float(orig_h)
 
-    # Scale up low-res full-page portrait covers/illustrations
-    if h >= w * 1.25 and 180 <= w < MAX_IMG_WIDTH_PT * 0.80:
+    if h >= w * 1.25 and 200 <= w < MAX_IMG_WIDTH_PT * 0.80:
         scale_up = min(MAX_IMG_WIDTH_PT / w, MAX_IMG_HEIGHT_PT / h)
         w *= scale_up
         h *= scale_up
 
-    # Scale down any diagram or image larger than our safe page content box
     if w > MAX_IMG_WIDTH_PT or h > MAX_IMG_HEIGHT_PT:
         scale_down = min(MAX_IMG_WIDTH_PT / w, MAX_IMG_HEIGHT_PT / h)
         w *= scale_down
@@ -121,12 +178,29 @@ def _compute_fitted_dimensions(orig_w: int, orig_h: int) -> tuple[int, int]:
     return max(1, int(round(w))), max(1, int(round(h)))
 
 
-def _sanitize_css_bytes(raw_css: bytes) -> bytes:
-    text = raw_css.decode("utf-8", errors="ignore")
-    text = _PAGE_RULE_RE.sub("", text)
-    text = _BROKEN_PROPS_RE.sub("", text)
-    text = text + "\n" + EPUB_READER_CSS
-    return text.encode("utf-8")
+_SVG_IMAGE_WRAPPER_RE = re.compile(
+    r"<svg[^>]*>[\s\S]*?<image[^>]+(?:xlink:href|href)\s*=\s*([\"'][^\"']+[\"'])[^>]*\/?>[\s\S]*?<\/svg>",
+    re.IGNORECASE,
+)
+_INLINE_IMG_WRAPPER_RE = re.compile(
+    r"<(?:a|span)\b[^>]*>\s*(<img\b[^>]*>)\s*<\/(?:a|span)>",
+    re.IGNORECASE,
+)
+_COLGROUP_RE = re.compile(
+    r"<colgroup\b[^>]*>[\s\S]*?<\/colgroup>|<col\b[^>]*\/?>",
+    re.IGNORECASE,
+)
+# Notice the (?!/) lookahead so self-closing tags like <div ... /> keep their trailing '/'!
+_BLOCK_TAG_ATTR_CLEAN_RE = re.compile(
+    r"<(table|thead|tbody|tfoot|tr|td|th|figure|figcaption|div|section|p)\b([^>]*?)(\/?>)",
+    re.IGNORECASE,
+)
+_STRIP_LAYOUT_ATTRS_RE = re.compile(
+    r'\s+(?:style|width|height|align|valign|cellspacing|cellpadding|border)\s*=\s*(?:"[^"]*"|\'[^\']*\')',
+    re.IGNORECASE,
+)
+_IMG_TAG_RE = re.compile(r"<img\b[^>]*>", re.IGNORECASE)
+_SRC_ATTR_RE = re.compile(r'\bsrc\s*=\s*["\']([^"\']+)["\']', re.IGNORECASE)
 
 
 def _sanitize_xhtml_bytes(
@@ -135,34 +209,41 @@ def _sanitize_xhtml_bytes(
     text = raw_html.decode("utf-8", errors="ignore")
     html_dir = os.path.dirname(html_filename)
 
-    # 1. Convert <svg><image href="..."/></svg> wrappers into clean <p><img></p> blocks
-    text = _SVG_IMAGE_WRAPPER_RE.sub(r'<p><img src=\1 /></p>', text)
+    # 1. Convert <svg><image href="..."/></svg> wrappers into clean <img src=.../>
+    text = _SVG_IMAGE_WRAPPER_RE.sub(r"<img src=\1 />", text)
 
-    # 2. Strip inline styles on tables/divs/figures that force fixed heights and cause text overlap
-    text = _CONTAINER_INLINE_STYLE_RE.sub(r"\1\2", text)
+    # 2. Unwrap <a><img></a> and <span><img></span>
+    text = _INLINE_IMG_WRAPPER_RE.sub(r"\1", text)
 
-    # 3. Also sanitize any internal <style>...</style> blocks embedded inside the XHTML head
-    def _clean_internal_style(m: re.Match) -> str:
-        inner = _PAGE_RULE_RE.sub("", m.group(1))
-        inner = _BROKEN_PROPS_RE.sub("", inner)
-        return f"<style type=\"text/css\">{inner}</style>"
+    # 3. Remove <colgroup>/<col> fixed column widths inside tables
+    text = _COLGROUP_RE.sub("", text)
 
+    # 4. Strip layout-breaking attributes while preserving self-closing '/>'
+    def _clean_block_tag(m: re.Match) -> str:
+        tag_name = m.group(1)
+        attrs = _STRIP_LAYOUT_ATTRS_RE.sub("", m.group(2))
+        closing = m.group(3)
+        return f"<{tag_name}{attrs}{closing}"
+
+    text = _BLOCK_TAG_ATTR_CLEAN_RE.sub(_clean_block_tag, text)
+
+    # 5. Sanitize any embedded <style>...</style> blocks in the XHTML
     text = re.sub(
         r"<style\b[^>]*>([\s\S]*?)<\/style>",
-        _clean_internal_style,
+        lambda m: f"<style type=\"text/css\">{_sanitize_css_text(m.group(1))}</style>",
         text,
         flags=re.IGNORECASE,
     )
 
-    # 4. Rewrite every <img> tag with HTML width="W" height="H" attributes ONLY
-    #    (In MuPDF, HTML width/height attributes properly reserve vertical layout space!)
+    # 6. Rewrite every <img> with exact proportional width & height
     def _fix_img_tag(match: re.Match) -> str:
         tag = match.group(0)
         src_m = _SRC_ATTR_RE.search(tag)
         if not src_m:
             return tag
 
-        raw_src = urllib_unquote(src_m.group(1).split("#")[0].split("?")[0])
+        src_val = src_m.group(1)
+        raw_src = unquote(src_val.split("#")[0].split("?")[0])
         norm_path = os.path.normpath(os.path.join(html_dir, raw_src)).replace("\\", "/")
 
         dims = (
@@ -172,21 +253,24 @@ def _sanitize_xhtml_bytes(
         )
         if dims:
             fit_w, fit_h = _compute_fitted_dimensions(dims[0], dims[1])
+            is_tiny_icon = dims[0] <= 42 and dims[1] <= 42
         else:
-            fit_w, fit_h = int(MAX_IMG_WIDTH_PT * 0.8), int(MAX_IMG_HEIGHT_PT * 0.45)
+            fit_w, fit_h = int(MAX_IMG_WIDTH_PT * 0.75), int(MAX_IMG_HEIGHT_PT * 0.4)
+            is_tiny_icon = False
 
-        clean_tag = _STYLE_ATTR_RE.sub("", tag)
-        clean_tag = _WIDTH_ATTR_RE.sub("", clean_tag)
-        clean_tag = _HEIGHT_ATTR_RE.sub("", clean_tag)
+        if is_tiny_icon:
+            return f'<img src="{src_val}" width="{fit_w}" height="{fit_h}" />'
 
-        size_attrs = f' width="{fit_w}" height="{fit_h}"'
-        if clean_tag.endswith("/>"):
-            return clean_tag[:-2] + size_attrs + " />"
-        return clean_tag[:-1] + size_attrs + ">"
+        return (
+            f'<div style="display:block; margin-top:8pt; margin-bottom:8pt; text-align:center;">'
+            f'<img src="{src_val}" width="{fit_w}" height="{fit_h}" '
+            f'style="display:block; margin-left:auto; margin-right:auto;" />'
+            f"</div>"
+        )
 
     text = _IMG_TAG_RE.sub(_fix_img_tag, text)
 
-    # 5. Inject our reader CSS override right before </head>
+    # 7. Append our Foliate-style EPUB_READER_CSS right before </head>
     if "</head>" in text.lower():
         override_style = f"<style type=\"text/css\">\n{EPUB_READER_CSS}\n</style>\n</head>"
         text = re.sub(r"</head>", override_style, text, count=1, flags=re.IGNORECASE)
@@ -194,17 +278,12 @@ def _sanitize_xhtml_bytes(
     return text.encode("utf-8")
 
 
-def urllib_unquote(s: str) -> str:
-    from urllib.parse import unquote
-    return unquote(s)
-
-
 def _get_cached_sanitized_epub(filepath: str) -> str:
-    """Returns path to a disk-cached sanitized EPUB (v4 with table & figure flow fixes)."""
+    """Returns path to a disk-cached sanitized EPUB (v6 with comment-safe CSS parser & clean Zip headers)."""
     abs_path = os.path.abspath(filepath)
     st = os.stat(abs_path)
-    # 'v4' invalidates older caches so tables and JPEG diagrams re-layout cleanly
-    cache_key = f"v4:{abs_path}:{st.st_mtime_ns}:{st.st_size}"
+    # 'v6' invalidates v5 cache
+    cache_key = f"v6:{abs_path}:{st.st_mtime_ns}:{st.st_size}"
     digest = hashlib.sha1(cache_key.encode("utf-8")).hexdigest()[:20]
     cached_epub = SANITIZED_EPUB_CACHE_DIR / f"{digest}.epub"
 
@@ -220,7 +299,6 @@ def _get_cached_sanitized_epub(filepath: str) -> str:
                 sz = _get_image_size_reliable(zin.read(item.filename), norm_name)
                 if sz:
                     img_dims[norm_name] = sz
-                    # Also index by basename as fallback for relative paths
                     img_dims.setdefault(os.path.basename(norm_name), sz)
 
         with zipfile.ZipFile(cached_epub, "w", compression=zipfile.ZIP_STORED) as zout:
@@ -233,7 +311,9 @@ def _get_cached_sanitized_epub(filepath: str) -> str:
                     data = _sanitize_xhtml_bytes(
                         data, item.filename.replace("\\", "/"), img_dims
                     )
-                zout.writestr(item, data)
+                # Always pass item.filename (str) instead of item (ZipInfo) so zipfile
+                # computes fresh file_size & CRC32 headers without leaving trailing bytes!
+                zout.writestr(item.filename, data)
 
     return str(cached_epub)
 

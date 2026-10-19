@@ -20,61 +20,85 @@ DEFAULT_EPUB_FONTSIZE = 12.5
 
 EPUB_READER_CSS = """
 @page {
-    margin: 36pt 32pt 36pt 32pt;
+    margin: 38pt 36pt 38pt 36pt;
 }
-body {
-    margin: 0;
-    padding: 0;
-    line-height: 1.55;
+html, body {
+    margin: 0 !important;
+    padding: 0 !important;
+    line-height: 1.6 !important;
 }
-p, li, dd, dt {
-    display: block;
-    line-height: 1.55;
-    margin-top: 0.45em;
-    margin-bottom: 0.55em;
+p, dd, dt, blockquote {
+    display: block !important;
+    line-height: 1.6 !important;
+    margin-top: 0.5em !important;
+    margin-bottom: 0.6em !important;
+    text-align: justify;
+}
+li {
+    line-height: 1.55 !important;
+    margin-top: 0.25em !important;
+    margin-bottom: 0.25em !important;
 }
 h1, h2, h3, h4, h5, h6 {
-    display: block;
-    line-height: 1.3;
-    margin-top: 1.0em;
-    margin-bottom: 0.45em;
+    display: block !important;
+    line-height: 1.3 !important;
+    margin-top: 1.2em !important;
+    margin-bottom: 0.5em !important;
+    page-break-after: avoid;
+    page-break-inside: avoid;
 }
-div, section, article, figure, figcaption, blockquote {
-    display: block;
-    margin-top: 0.5em;
-    margin-bottom: 0.6em;
+div, section, article, main, aside, header, footer, figure, figcaption {
+    display: block !important;
+    margin-top: 0.4em;
+    margin-bottom: 0.4em;
 }
 table {
-    display: table;
-    width: 100%;
-    border-collapse: collapse;
-    margin-top: 0.8em;
-    margin-bottom: 0.8em;
+    display: table !important;
+    width: 100% !important;
+    border-collapse: collapse !important;
+    margin-top: 12pt !important;
+    margin-bottom: 12pt !important;
+    page-break-inside: avoid;
+}
+thead {
+    display: table-header-group !important;
+}
+tbody {
+    display: table-row-group !important;
 }
 tr {
-    display: table-row;
+    display: table-row !important;
+    page-break-inside: avoid;
 }
 th, td {
-    display: table-cell;
-    padding: 4pt 6pt;
-    border: 1pt solid #666666;
-    line-height: 1.4;
+    display: table-cell !important;
+    padding: 5pt 7pt !important;
+    border: 1pt solid #6C7086 !important;
+    line-height: 1.4 !important;
+    text-align: left !important;
+    vertical-align: top !important;
 }
-pre, code {
-    display: block;
-    margin-top: 0.6em;
-    margin-bottom: 0.6em;
-    padding: 6pt;
-    border: 1pt solid #777777;
-    white-space: pre-wrap;
-    word-wrap: break-word;
+th {
+    font-weight: bold !important;
+}
+pre, code.block {
+    display: block !important;
+    margin-top: 8pt !important;
+    margin-bottom: 8pt !important;
+    padding: 8pt !important;
+    border: 1pt solid #585B70 !important;
+    white-space: pre-wrap !important;
+    word-wrap: break-word !important;
+    line-height: 1.35 !important;
+    font-size: 0.88em !important;
 }
 img {
-    display: block;
-    margin-top: 6pt;
-    margin-bottom: 6pt;
-    margin-left: auto;
-    margin-right: auto;
+    display: block !important;
+    margin-top: 8pt !important;
+    margin-bottom: 8pt !important;
+    margin-left: auto !important;
+    margin-right: auto !important;
+    page-break-inside: avoid;
 }
 """
 
