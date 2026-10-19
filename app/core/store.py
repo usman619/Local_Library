@@ -1,6 +1,8 @@
 import os
+import re
 import json
 import hashlib
+import zipfile
 from pathlib import Path
 from datetime import datetime
 import pymupdf
@@ -12,7 +14,7 @@ SUPPORTED_EXTENSIONS = {".pdf", ".epub", ".fb2", ".mobi", ".cbz", ".xps", ".txt"
 
 
 class LibraryStore:
-    """Manages persistent book metadata, reading progress, reading time, TTS memory, bookmarks, and highlights."""
+    """Manages persistent book metadata, high-res covers, reading progress, reading time, and annotations."""
 
     def __init__(self):
         self.db_file = LIBRARY_DB_FILE
@@ -34,6 +36,84 @@ class LibraryStore:
     def book_id(filepath: str) -> str:
         return hashlib.sha1(os.path.abspath(filepath).encode("utf-8")).hexdigest()[:16]
 
+    @staticmethod
+    def _extract_epub_cover_bytes(filepath: str) -> bytes | None:
+        """Extracts raw cover image bytes directly from an EPUB archive so covers never have white margins."""
+        if not zipfile.is_zipfile(filepath):
+            return None
+        try:
+            with zipfile.ZipFile(filepath, "r") as zf:
+                names = zf.namelist()
+                img_exts = (".jpg", ".jpeg", ".png", ".webp")
+                image_files = [n for n in names if n.lower().endswith(img_exts)]
+                if not image_files:
+                    return None
+
+                # 1. Check OPF manifest for explicit cover image reference
+                opf_files = [n for n in names if n.lower().endswith(".opf")]
+                for opf_name in opf_files:
+                    opf_text = zf.read(opf_name).decode("utf-8", errors="ignore")
+                    opf_dir = os.path.dirname(opf_name)
+                    # Look for <item ... properties="cover-image" href="..."/> or id="cover..."
+                    for match in re.finditer(r"<item\b[^>]+>", opf_text, re.IGNORECASE):
+                        tag = match.group(0)
+                        if "cover" in tag.lower() and any(ext in tag.lower() for ext in img_exts):
+                            href_m = re.search(r'href\s*=\s*["\']([^"\']+)["\']', tag, re.IGNORECASE)
+                            if href_m:
+                                candidate = os.path.normpath(os.path.join(opf_dir, href_m.group(1))).replace("\\", "/")
+                                if candidate in names:
+                                    return zf.read(candidate)
+
+                # 2. Fallback: any image with 'cover' in its filename
+                for img_name in image_files:
+                    if "cover" in Path(img_name).stem.lower():
+                        return zf.read(img_name)
+
+                # 3. Fallback: largest image among the first 5 images in the archive
+                first_imgs = image_files[:5]
+                best_name = max(first_imgs, key=lambda n: zf.getinfo(n).file_size)
+                if zf.getinfo(best_name).file_size > 4096:
+                    return zf.read(best_name)
+        except Exception:
+            pass
+        return None
+
+    def _generate_cover(self, filepath: str, doc: pymupdf.Document, cover_path: Path):
+        ext = Path(filepath).suffix.lower()
+
+        # 1. For EPUBs, extract native cover image directly from the zip archive
+        if ext == ".epub":
+            raw_bytes = self._extract_epub_cover_bytes(filepath)
+            if raw_bytes:
+                try:
+                    pix = pymupdf.Pixmap(raw_bytes)
+                    if pix.n - pix.alpha > 3:  # Convert CMYK to RGB if needed
+                        pix = pymupdf.Pixmap(pymupdf.csRGB, pix)
+                    pix.save(str(cover_path))
+                    return
+                except Exception:
+                    pass
+
+        # 2. Check if Page 0 has an embedded full-cover image we can extract cleanly
+        if len(doc) > 0:
+            try:
+                page = doc.load_page(0)
+                imgs = page.get_images(full=True)
+                if ext in (".epub", ".fb2", ".mobi") and imgs:
+                    xref = imgs[0][0]
+                    pix = pymupdf.Pixmap(doc, xref)
+                    if pix.width >= 120 and pix.height >= 150:
+                        if pix.n - pix.alpha > 3:
+                            pix = pymupdf.Pixmap(pymupdf.csRGB, pix)
+                        pix.save(str(cover_path))
+                        return
+
+                # 3. Standard PDF / fallback page render
+                pix = page.get_pixmap(matrix=pymupdf.Matrix(0.75, 0.75), alpha=False)
+                pix.save(str(cover_path))
+            except Exception:
+                pass
+
     def add_or_update_book(
         self, filepath: str, open_doc: pymupdf.Document | None = None
     ) -> dict | None:
@@ -47,7 +127,6 @@ class LibraryStore:
         existing = self.books.get(bid, {})
         cover_path = self.covers_dir / f"{bid}.png"
 
-        # Fast path: if already in database, cover exists, and open_doc is provided
         should_close = False
         doc = open_doc
         if doc is None:
@@ -63,13 +142,12 @@ class LibraryStore:
         publisher = (meta.get("producer") or meta.get("creator") or "").strip()
         total_pages = len(doc)
 
-        if not cover_path.exists() and total_pages > 0:
-            try:
-                page = doc.load_page(0)
-                pix = page.get_pixmap(matrix=pymupdf.Matrix(0.6, 0.6), alpha=False)
-                pix.save(str(cover_path))
-            except Exception:
-                pass
+        # Regenerate cover if missing or if an EPUB hasn't been upgraded to v2 native cover extraction
+        needs_cover_upgrade = (
+            Path(filepath).suffix.lower() == ".epub" and not existing.get("cover_v2", False)
+        )
+        if (not cover_path.exists() or needs_cover_upgrade) and total_pages > 0:
+            self._generate_cover(filepath, doc, cover_path)
 
         if should_close:
             doc.close()
@@ -82,6 +160,7 @@ class LibraryStore:
             "publisher": publisher or existing.get("publisher", ""),
             "format": Path(filepath).suffix.upper().lstrip("."),
             "cover": str(cover_path),
+            "cover_v2": True,
             "current_page": existing.get("current_page", 0),
             "total_pages": max(1, total_pages),
             "word_count": existing.get("word_count", 0),
@@ -99,6 +178,28 @@ class LibraryStore:
         self.books[bid] = record
         self.save()
         return record
+
+    def refresh_epub_covers_once(self):
+        """Upgrades any existing EPUB book cards that still have old v1 white-box covers."""
+        updated = False
+        for bid, book in list(self.books.items()):
+            if book.get("format") == "EPUB" and not book.get("cover_v2", False):
+                path = book.get("path", "")
+                if os.path.exists(path):
+                    raw_bytes = self._extract_epub_cover_bytes(path)
+                    if raw_bytes:
+                        try:
+                            cover_path = Path(book.get("cover", self.covers_dir / f"{bid}.png"))
+                            pix = pymupdf.Pixmap(raw_bytes)
+                            if pix.n - pix.alpha > 3:
+                                pix = pymupdf.Pixmap(pymupdf.csRGB, pix)
+                            pix.save(str(cover_path))
+                            book["cover_v2"] = True
+                            updated = True
+                        except Exception:
+                            pass
+        if updated:
+            self.save()
 
     def add_reading_time(self, filepath: str, seconds: int):
         bid = self.book_id(filepath)

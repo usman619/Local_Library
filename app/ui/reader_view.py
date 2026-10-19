@@ -162,6 +162,8 @@ class ReaderView(QWidget):
         self.canvas.lookup_requested.connect(self.open_lookup_dialog)
         self.canvas.note_requested_for_selection.connect(self._on_canvas_note_for_selection)
         self.canvas.edit_highlight_note_requested.connect(self._edit_highlight_note_by_index)
+        self.canvas.tts_requested_at_page.connect(self._start_tts_from_selection)
+
         self.splitter.addWidget(self.canvas)
         self.splitter.setStretchFactor(1, 1)
         root.addWidget(self.splitter, stretch=1)
@@ -487,6 +489,8 @@ class ReaderView(QWidget):
             self.progress_updated.emit(
                 f"  {page_str} ({pct}%)  •  Zoom {int(zoom * 100)}%  "
             )
+            # Visually sync the Contents (TOC) sidebar to the current scrolled page
+            self._sync_toc_to_page(last_visible_page)
 
     def jump_to_page(self, page_index: int):
         self.canvas.jump_to_page(page_index)
@@ -512,19 +516,59 @@ class ReaderView(QWidget):
     # -----------------------------------------------------------------
     def _populate_toc(self):
         self.toc_tree.clear()
+        self._toc_items: list[tuple[int, QTreeWidgetItem]] = []
         if not self.doc:
             return
         toc = self.doc.get_toc()
         stack = [(0, self.toc_tree.invisibleRootItem())]
         for lvl, title, page_num in toc:
+            page_idx = max(0, page_num - 1)
             item = QTreeWidgetItem([f"{title}  (p. {page_num})"])
-            item.setData(0, Qt.UserRole, max(0, page_num - 1))
+            item.setData(0, Qt.UserRole, page_idx)
             while stack and stack[-1][0] >= lvl:
                 stack.pop()
             parent = stack[-1][1] if stack else self.toc_tree.invisibleRootItem()
             parent.addChild(item)
             stack.append((lvl, item))
+            self._toc_items.append((page_idx, item))
         self.toc_tree.expandToDepth(1)
+
+    def _sync_toc_to_page(self, current_page_idx: int):
+        """Highlights and scrolls to the active chapter/section in the Contents tree while scrolling."""
+        if not getattr(self, "_toc_items", None):
+            return
+
+        active_item: QTreeWidgetItem | None = None
+        for toc_page, item in self._toc_items:
+            if toc_page <= current_page_idx:
+                active_item = item
+            else:
+                break
+
+        if active_item is None:
+            active_item = self._toc_items[0][1]
+
+        if self.toc_tree.currentItem() is active_item:
+            return
+
+        # Block signals briefly so programmatically selecting the item doesn't trigger a page jump
+        self.toc_tree.blockSignals(True)
+        for _p, item in self._toc_items:
+            font = item.font(0)
+            is_curr = item is active_item
+            font.setBold(is_curr)
+            item.setFont(0, font)
+            item.setForeground(0, QColor("#89B4FA" if is_curr else "#CDD6F4"))
+
+        # Expand parent nodes so the active subsection is visible
+        parent = active_item.parent()
+        while parent is not None:
+            parent.setExpanded(True)
+            parent = parent.parent()
+
+        self.toc_tree.setCurrentItem(active_item)
+        self.toc_tree.scrollToItem(active_item, QTreeWidget.PositionAtCenter)
+        self.toc_tree.blockSignals(False)
 
     def _on_toc_clicked(self, item: QTreeWidgetItem, _col: int):
         page_idx = item.data(0, Qt.UserRole)
@@ -759,9 +803,58 @@ class ReaderView(QWidget):
         if self.tts_worker and self.tts_worker.isRunning():
             self.tts_worker.set_pitch(value)
 
+    @staticmethod
+    def _find_matching_tts_unit_index(
+        units: list[TTSUnit], page_idx: int, selected_text: str
+    ) -> int:
+        """Finds the exact TTSUnit matching the user's selected word, sentence, or paragraph."""
+        import re
+
+        def norm(s: str) -> str:
+            return re.sub(r"[^\w\s]", "", " ".join(s.lower().split()))
+
+        sel_clean = " ".join(selected_text.split()).lower()
+        sel_norm = norm(selected_text)
+        sel_words = sel_norm.split()
+
+        # 1. Exact substring match on normalized text (first 40 chars)
+        needle = sel_norm[:45].strip()
+        if needle:
+            for idx, u in enumerate(units):
+                if u.page_idx == page_idx and needle in norm(u.text):
+                    return idx
+
+        # 2. Match if the unit text is contained inside a multi-sentence paragraph selection
+        if len(sel_norm) > 25:
+            for idx, u in enumerate(units):
+                u_norm = norm(u.text)
+                if u.page_idx == page_idx and len(u_norm) >= 10 and u_norm[:30] in sel_norm:
+                    return idx
+
+        # 3. Single-word or short-phrase token match
+        if sel_words:
+            first_phrase = " ".join(sel_words[: min(3, len(sel_words))])
+            for idx, u in enumerate(units):
+                if u.page_idx == page_idx and first_phrase in norm(u.text):
+                    return idx
+            first_word = sel_words[0]
+            for idx, u in enumerate(units):
+                if u.page_idx == page_idx and first_word in norm(u.text).split():
+                    return idx
+
+        return 0
+
     def _start_tts_from_selection(self, page_idx: int, selected_text: str):
+        """
+        Immediately stops any active TTS worker, overrides saved TTS memory,
+        and starts reading directly from the user's selected text.
+        """
         self.stop_tts()
         if not self.doc or not self.current_book:
+            return
+
+        selected_clean = " ".join(selected_text.split()).strip()
+        if not selected_clean:
             return
 
         end_page = min(len(self.doc), page_idx + 20)
@@ -770,22 +863,60 @@ class ReaderView(QWidget):
             blocks = self.doc.load_page(p_idx).get_text("blocks")
             units.extend(build_page_units(p_idx, blocks))
 
+        # Fallback: if build_page_units filtered out short/copyright text on this page,
+        # synthesize TTSUnits directly from the selected text so '▶ Read' ALWAYS works.
         if not units:
-            return
+            units = [
+                TTSUnit(
+                    page_idx=page_idx,
+                    para_idx=0,
+                    sent_idx=0,
+                    text=selected_clean,
+                )
+            ]
+            start_index = 0
+        else:
+            start_index = self._find_matching_tts_unit_index(units, page_idx, selected_clean)
+            # If the user selected a specific phrase inside a longer sentence, trim the first unit
+            # so speech starts at the exact word they selected
+            matched_unit = units[start_index]
+            pos = matched_unit.text.lower().find(selected_clean[:25].lower())
+            if pos > 0:
+                trimmed = matched_unit.text[pos:].strip()
+                if len(trimmed) >= 3:
+                    units[start_index] = TTSUnit(
+                        page_idx=matched_unit.page_idx,
+                        para_idx=matched_unit.para_idx,
+                        sent_idx=matched_unit.sent_idx,
+                        text=trimmed,
+                    )
 
-        start_index = 0
-        needle = selected_text[:35].lower()
-        for idx, u in enumerate(units):
-            if u.page_idx == page_idx and needle in u.text.lower():
-                start_index = idx
-                break
+        target_unit = units[start_index]
+        self.current_book["tts_state"] = {
+            "page": target_unit.page_idx,
+            "para_idx": target_unit.para_idx,
+            "sent_idx": target_unit.sent_idx,
+            "speed": self._current_speed(),
+            "pitch": self._current_pitch(),
+        }
+        self.store.save()
 
+        self._on_tts_status(f"Starting TTS on Page {page_idx + 1}: “{selected_clean[:45]}...”")
         self._launch_tts_worker(units, start_index)
 
     def toggle_tts_play_pause(self):
         if not self.doc or not self.current_book:
             return
 
+        # Priority 1: If the user currently has text selected on the page,
+        # clicking Play (▶) immediately starts reading from that selection!
+        sel_page, sel_text = self.canvas.get_active_selection()
+        if sel_page is not None and sel_text:
+            self.canvas.clear_selection()
+            self._start_tts_from_selection(sel_page, sel_text)
+            return
+
+        # Priority 2: Pause or resume an already running TTS worker
         if self.tts_worker and self.tts_worker.isRunning():
             if self.tts_worker.is_paused:
                 self.tts_worker.resume()
@@ -793,6 +924,7 @@ class ReaderView(QWidget):
                 self.tts_worker.pause()
             return
 
+        # Priority 3: Resume from saved TTS position on current page (or start at top of current page)
         cur_page = self.current_book.get("current_page", 0)
         tts_state = self.current_book.get("tts_state", {})
         saved_page = tts_state.get("page", cur_page)
@@ -897,9 +1029,19 @@ class ReaderView(QWidget):
             self.lbl_tts_status.setStyleSheet("color: #A6E3A1; font-size: 12px;")
 
     def stop_tts(self):
-        if self.tts_worker and self.tts_worker.isRunning():
-            self.tts_worker.stop()
-            self.tts_worker.wait(600)
+        if self.tts_worker:
+            # Disconnect signals first so the dying thread's 'stopped' signal
+            # never clobbers a newly started TTS worker!
+            try:
+                self.tts_worker.status_changed.disconnect()
+                self.tts_worker.unit_started.disconnect()
+                self.tts_worker.playback_state_changed.disconnect()
+            except Exception:
+                pass
+            if self.tts_worker.isRunning():
+                self.tts_worker.stop()
+                self.tts_worker.wait(600)
+            self.tts_worker = None
 
         prev_page = self.canvas.active_tts_page
         self.canvas.active_tts_page = None

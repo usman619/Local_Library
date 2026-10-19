@@ -86,7 +86,9 @@ class SelectionPopupBar(QFrame):
         layout.addWidget(btn_note)
 
         btn_tts = QPushButton("▶ Read")
-        btn_tts.setToolTip("Read aloud starting from this page")
+        btn_tts.setFocusPolicy(Qt.NoFocus)
+        btn_tts.setCursor(QCursor(Qt.PointingHandCursor))
+        btn_tts.setToolTip("Read aloud starting from this selection")
         btn_tts.clicked.connect(self.tts_from_here_requested.emit)
         layout.addWidget(btn_tts)
 
@@ -148,11 +150,12 @@ class DocumentCanvasView(QAbstractScrollArea):
         self.active_search_match: tuple[int, pymupdf.Rect] | None = None
 
         self.selection_popup = SelectionPopupBar(self.viewport())
+
         self.selection_popup.copy_requested.connect(self.copy_selected_text)
         self.selection_popup.highlight_requested.connect(self._create_highlight_from_selection)
         self.selection_popup.tts_from_here_requested.connect(self._request_tts_from_selection)
         self.selection_popup.note_requested.connect(self._request_note_from_selection)
-
+        self.selection_popup.lookup_requested.connect(self._request_lookup_from_selection)
 
         self.verticalScrollBar().setSingleStep(22)
         self.horizontalScrollBar().setSingleStep(22)
@@ -176,8 +179,6 @@ class DocumentCanvasView(QAbstractScrollArea):
         self._flip_cooldown = QTimer()
         self._flip_cooldown.setSingleShot(True)
         self._flip_cooldown.setInterval(220)
-
-        self.selection_popup.lookup_requested.connect(self._request_lookup_from_selection)
 
         self._prefetch_timer = QTimer()
         self._prefetch_timer.setSingleShot(True)
@@ -700,6 +701,12 @@ class DocumentCanvasView(QAbstractScrollArea):
         if self._sel_text.strip():
             QApplication.clipboard().setText(self._sel_text.strip())
             self.selection_popup.hide()
+    
+    def get_active_selection(self) -> tuple[int | None, str]:
+        """Returns (selected_page_idx, selected_text) if user has an active text selection."""
+        if self._sel_page is not None and self._sel_text.strip():
+            return self._sel_page, self._sel_text.strip()
+        return None, ""
 
     def _create_highlight_from_selection(self, color_key: str):
         if self._sel_page is not None and self._sel_text.strip():
@@ -718,10 +725,11 @@ class DocumentCanvasView(QAbstractScrollArea):
             self.note_requested_for_selection.emit(page, txt, rects_copy)
 
     def _request_tts_from_selection(self):
-        if self._sel_text.strip():
-            txt = self._sel_text.strip()
-            self.selection_popup.hide()
-            self.tts_requested.emit(txt)
+     if self._sel_page is not None and self._sel_text.strip():
+         page = int(self._sel_page)
+         txt = str(self._sel_text.strip())
+         self.clear_selection()
+         self.tts_requested_at_page.emit(page, txt)
 
     def _request_lookup_from_selection(self):
         if self._sel_text.strip():

@@ -20,34 +20,61 @@ DEFAULT_EPUB_FONTSIZE = 12.5
 
 EPUB_READER_CSS = """
 @page {
-    margin: 40pt 36pt 40pt 36pt;
+    margin: 36pt 32pt 36pt 32pt;
 }
 body {
     margin: 0;
     padding: 0;
-    line-height: 1.6;
+    line-height: 1.55;
 }
 p, li, dd, dt {
-    line-height: 1.6;
-    margin-top: 0.4em;
-    margin-bottom: 0.6em;
+    display: block;
+    line-height: 1.55;
+    margin-top: 0.45em;
+    margin-bottom: 0.55em;
 }
 h1, h2, h3, h4, h5, h6 {
+    display: block;
     line-height: 1.3;
-    margin-top: 1.1em;
-    margin-bottom: 0.5em;
-    page-break-after: avoid;
-    page-break-inside: avoid;
+    margin-top: 1.0em;
+    margin-bottom: 0.45em;
 }
-pre, code, blockquote, table, figure, img {
-    max-width: 100%;
-    page-break-inside: avoid;
+div, section, article, figure, figcaption, blockquote {
+    display: block;
+    margin-top: 0.5em;
+    margin-bottom: 0.6em;
 }
-pre {
-    padding: 8pt;
-    border: 1pt solid #888888;
+table {
+    display: table;
+    width: 100%;
+    border-collapse: collapse;
+    margin-top: 0.8em;
+    margin-bottom: 0.8em;
+}
+tr {
+    display: table-row;
+}
+th, td {
+    display: table-cell;
+    padding: 4pt 6pt;
+    border: 1pt solid #666666;
+    line-height: 1.4;
+}
+pre, code {
+    display: block;
+    margin-top: 0.6em;
+    margin-bottom: 0.6em;
+    padding: 6pt;
+    border: 1pt solid #777777;
     white-space: pre-wrap;
     word-wrap: break-word;
+}
+img {
+    display: block;
+    margin-top: 6pt;
+    margin-bottom: 6pt;
+    margin-left: auto;
+    margin-right: auto;
 }
 """
 
