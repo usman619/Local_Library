@@ -117,7 +117,7 @@ class LocalLibraryWindow(QMainWindow):
 
     def __init__(self):
         super().__init__()
-        self.setWindowTitle("LocalLibrary — Linux eBook & PDF Reader")
+        self.setWindowTitle("Linux eBook & PDF Reader")
         self.resize(1280, 860)
         self.setStyleSheet(GLOBAL_STYLESHEET)
 
@@ -256,7 +256,7 @@ class LocalLibraryWindow(QMainWindow):
         self.lbl_page_status.setText("")
         self._set_reader_controls_visible(False)
         self._set_library_controls_visible(True)
-        self.setWindowTitle("LocalLibrary — Linux eBook & PDF Reader")
+        self.setWindowTitle("Linux eBook & PDF Reader")
         self.library_view.populate(self.store.books, self.width())
         self.stack.setCurrentIndex(0)
 
@@ -343,5 +343,5 @@ class LocalLibraryWindow(QMainWindow):
             if self.reader_view.current_book
             else "Book"
         )
-        self.setWindowTitle(f"{book_title} — LocalLibrary")
+        self.setWindowTitle(f"{book_title}")
         self.stack.setCurrentIndex(1)

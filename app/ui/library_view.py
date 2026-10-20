@@ -1,4 +1,4 @@
-from PySide6.QtCore import Qt, Signal
+from PySide6.QtCore import Qt, Signal, QTimer
 from PySide6.QtGui import QFont
 from PySide6.QtWidgets import (
     QWidget, QVBoxLayout, QHBoxLayout, QLabel, QLineEdit,
@@ -16,6 +16,9 @@ class LibraryView(QWidget):
     book_remove_requested = Signal(str)
     add_books_requested = Signal()
     import_folders_requested = Signal()
+
+    CARD_WIDTH = 215
+    GRID_SPACING = 18
 
     CARD_Outer_WIDTH = 235
 
@@ -150,10 +153,10 @@ class LibraryView(QWidget):
         self.grid_container = QWidget()
         self.grid_container.setStyleSheet("background: transparent;")
         self.grid_layout = QGridLayout(self.grid_container)
-        self.grid_layout.setContentsMargins(2, 8, 2, 16)
-        self.grid_layout.setHorizontalSpacing(18)
-        self.grid_layout.setVerticalSpacing(18)
-        self.grid_layout.setAlignment(Qt.AlignTop | Qt.AlignLeft)
+        self.grid_layout.setContentsMargins(0, 8, 0, 16)
+        self.grid_layout.setHorizontalSpacing(self.GRID_SPACING)
+        self.grid_layout.setVerticalSpacing(self.GRID_SPACING)
+        self.grid_layout.setAlignment(Qt.AlignTop | Qt.AlignHCenter)
 
         self.scroll.setWidget(self.grid_container)
         root_layout.addWidget(self.scroll, stretch=1)
@@ -265,7 +268,9 @@ class LibraryView(QWidget):
 
     def populate(self, books: dict, window_width: int = 1280):
         self._books_cache = books
-        self._rebuild_grid(force=True)
+        self._fallback_width = window_width
+        # Delay the grid rebuild by 20ms so Qt has time to apply the true window geometry
+        QTimer.singleShot(20, lambda: self._rebuild_grid(force=True))
 
     def _on_filters_changed(self, *_args):
         self._rebuild_grid(force=True)
@@ -277,8 +282,8 @@ class LibraryView(QWidget):
     def _compute_columns(self) -> int:
         avail_w = self.scroll.viewport().width()
         if avail_w <= 100:
-            avail_w = max(600, self.width() - 60)
-        return max(2, avail_w // self.CARD_Outer_WIDTH)
+            avail_w = getattr(self, "_fallback_width", 1280) - 70
+        return max(2, (avail_w + self.GRID_SPACING) // (self.CARD_WIDTH + self.GRID_SPACING))
 
     def _get_filtered_sorted_books(self) -> list[dict]:
         query = self.search_input.text().strip().lower()
@@ -355,7 +360,7 @@ class LibraryView(QWidget):
             self.grid_layout.addWidget(empty_widget, 0, 0)
             return
 
-        self.grid_layout.setAlignment(Qt.AlignTop | Qt.AlignLeft)
+        self.grid_layout.setAlignment(Qt.AlignTop | Qt.AlignHCenter)
         for idx, book in enumerate(filtered):
             card = BookCardWidget(book)
             card.clicked.connect(self.book_selected.emit)
