@@ -7,12 +7,14 @@ CACHE_HOME = Path(os.environ.get("XDG_CACHE_HOME", Path.home() / ".cache"))
 APP_DATA_DIR = DATA_HOME / "local_library"
 COVERS_CACHE_DIR = CACHE_HOME / "local_library" / "covers"
 SANITIZED_EPUB_CACHE_DIR = CACHE_HOME / "local_library" / "sanitized_epubs"
+OCR_CACHE_DIR = CACHE_HOME / "local_library" / "ocr_cache"
 LIBRARY_DB_FILE = APP_DATA_DIR / "library.json"
 SETTINGS_FILE = APP_DATA_DIR / "settings.json"
 
 APP_DATA_DIR.mkdir(parents=True, exist_ok=True)
 COVERS_CACHE_DIR.mkdir(parents=True, exist_ok=True)
 SANITIZED_EPUB_CACHE_DIR.mkdir(parents=True, exist_ok=True)
+OCR_CACHE_DIR.mkdir(parents=True, exist_ok=True)
 
 # Reflowable eBook (EPUB, FB2, MOBI) layout configuration
 EPUB_PAGE_WIDTH = 600

@@ -57,6 +57,88 @@ pip install PySide6 pymupdf numpy edge-tts
 pip install -r requirements.txt
 ```
 
+## System Architecture
+
+```mermaid
+flowchart TB
+    subgraph Entry ["OS & Application Bootstrap"]
+        MAIN["main.py\n(OS Process Identity & HiDPI Init)"]
+        DESKTOP["install_desktop.py / uninstall.py\n(XDG .desktop & Hicolor Icons)"]
+    end
+
+    subgraph UI_Layer ["Presentation Layer (PySide6 / Qt6)"]
+        MW["LocalLibraryWindow\n(app/ui/main_window.py)"]
+        LV["LibraryView\n(Responsive Book Grid & Filters)"]
+        RV["ReaderView\n(TOC, Bookmarks, Notes, Search & TTS Bar)"]
+        DCV["DocumentCanvasView\n(Virtualized Viewport & Pinch-to-Zoom)"]
+        POP["SelectionPopupBar & LookupDialog\n(Highlights, Notes, Dict/Wiki/Translate)"]
+    end
+
+    subgraph Core_Engine ["Document & Rendering Engine"]
+        EL["EPUB Loader & Foliate Normalizer\n(app/core/epub_loader.py)"]
+        PR["HiDPI PageRenderer & NumPy LUTs\n(app/core/renderer.py)"]
+        OCR["HybridOCREngine\n(app/core/ocr_engine.py)"]
+        MUPDF["PyMuPDF C-Engine & Native Tesseract Bridge\n(pymupdf + libtesseract)"]
+    end
+
+    subgraph TTS_Pipeline ["Neural TTS & Look-Ahead Audio Pipeline"]
+        TTSW["NeuralTTSWorker (QThread)\n(app/core/tts_worker.py)"]
+        PRE["ThreadPool Look-Ahead Prefetcher\n(3-Sentence Concurrent Queue)"]
+        SYNTH["Speech Synthesizers\n(Edge-TTS Cloud / Local Kokoro)"]
+        AUDIO["Multi-Backend Linux Audio Player\n(mpv / ffplay / paplay / sounddevice)"]
+    end
+
+    subgraph Persistence ["XDG Local Storage & Disk Caches"]
+        STORE["LibraryStore\n(app/core/store.py)"]
+        DB[("library.json & settings.json\n(~/.local/share/local_library/)")]
+        CACHE[("Sanitized EPUBs, Covers & OCR Cache\n(~/.cache/local_library/)")]
+    end
+
+    %% Flow Connections
+    MAIN --> MW
+    MW --> LV
+    MW --> RV
+    RV --> DCV
+    DCV --> POP
+
+    %% Store & Data Connections
+    MW --> STORE
+    RV --> STORE
+    STORE <--> DB
+    EL <--> CACHE
+    OCR <--> CACHE
+
+    %% Document Loading & Rendering Connections
+    RV --> EL
+    EL --> MUPDF
+    DCV --> PR
+    PR --> MUPDF
+    PR --> OCR
+
+    %% OCR & Text Extraction Connections
+    RV --> OCR
+    OCR --> MUPDF
+
+    %% TTS Pipeline Connections
+    POP -->|Read Selection| RV
+    RV -->|TTSUnits & Live Settings| TTSW
+    TTSW --> PRE
+    PRE --> SYNTH
+    TTSW --> AUDIO
+    TTSW -->|unit_started Signal| DCV
+
+    %% Styling Definitions
+    classDef ui fill:#1E1E2E,stroke:#89B4FA,stroke-width:2px,color:#CDD6F4;
+    classDef core fill:#181825,stroke:#A6E3A1,stroke-width:2px,color:#CDD6F4;
+    classDef tts fill:#181825,stroke:#F9E2AF,stroke-width:2px,color:#CDD6F4;
+    classDef storage fill:#11111B,stroke:#F5C2E7,stroke-width:2px,color:#CDD6F4;
+
+    class MAIN,DESKTOP,MW,LV,RV,DCV,POP ui;
+    class EL,PR,OCR,MUPDF core;
+    class TTSW,PRE,SYNTH,AUDIO tts;
+    class STORE,DB,CACHE storage;
+```
+
 ## UI 
 | **Feature**                    | **Screenshot Preview** |
 |-------------------------------|------------------------|
@@ -79,6 +161,10 @@ To install LocalLibrary into your Linux application launcher menu with the custo
 
 ```bash
 python install_desktop.py
+```
+To uninstall LocalLibrary from your linux application launcher menu:
+```bash
+python uninstall_desktop.py
 ```
 ## License
 Distributed under the GPLv3 License. See [LICENSE](LICENSE) for more information.

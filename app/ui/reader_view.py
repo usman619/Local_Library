@@ -11,13 +11,19 @@ from PySide6.QtWidgets import (
 
 from app.config import DEFAULT_EPUB_FONTSIZE, TTS_VOICES, HIGHLIGHT_COLORS
 from app.core.epub_loader import open_clean_document
-from app.core.tts_worker import NeuralTTSWorker, TTSUnit, build_page_units
 from app.ui.widgets import DocumentCanvasView
 from app.ui.dialogs import (
     LookupPopupDialog,
     BookInfoDialog,
     AnnotationNoteDialog,
     export_book_notes_to_markdown,
+)
+
+from app.core.tts_worker import (
+    NeuralTTSWorker,
+    TTSUnit,
+    build_page_units,
+    extract_page_tts_units,
 )
 
 class ReaderView(QWidget):
@@ -284,7 +290,29 @@ class ReaderView(QWidget):
 
         root.addWidget(tts_bar)
 
-        
+    def _collect_tts_units_window(self, start_page: int, max_pages: int = 15) -> list[TTSUnit]:
+     if not self.doc or not self.current_book:
+         return []
+
+     filepath = self.current_book.get("path", "")
+     end_page = min(len(self.doc), start_page + max_pages)
+     units: list[TTSUnit] = []
+
+     for p_idx in range(start_page, end_page):
+         page_units, used_ocr = extract_page_tts_units(
+             self.doc, p_idx, filepath=filepath, allow_ocr=True
+         )
+         if used_ocr:
+             self._on_tts_status(
+                 f"🔍 OCR Extracted {len(page_units)} sentences from scanned Page {p_idx + 1}..."
+             )
+         units.extend(page_units)
+         # If the book is a heavy scanned PDF requiring live OCR, only OCR 2 pages ahead initially
+         # so audio starts speaking immediately!
+         if used_ocr and (p_idx - start_page) >= 1 and len(units) >= 5:
+             break
+
+     return units
 
     def _setup_shortcuts(self):
         self.shortcut_find = QShortcut(QKeySequence("Ctrl+F"), self)
@@ -993,11 +1021,8 @@ class ReaderView(QWidget):
         if not selected_clean:
             return
 
-        end_page = min(len(self.doc), page_idx + 20)
-        units: list[TTSUnit] = []
-        for p_idx in range(page_idx, end_page):
-            blocks = self.doc.load_page(p_idx).get_text("blocks")
-            units.extend(build_page_units(p_idx, blocks))
+        # Replaces the entire old for-loop:
+        units = self._collect_tts_units_window(page_idx, max_pages=15)
 
         # Fallback: if build_page_units filtered out short/copyright text on this page,
         # synthesize TTSUnits directly from the selected text so '▶ Read' ALWAYS works.
@@ -1025,6 +1050,7 @@ class ReaderView(QWidget):
                         para_idx=matched_unit.para_idx,
                         sent_idx=matched_unit.sent_idx,
                         text=trimmed,
+                        bbox=matched_unit.bbox,
                     )
 
         target_unit = units[start_index]
@@ -1032,6 +1058,7 @@ class ReaderView(QWidget):
             "page": target_unit.page_idx,
             "para_idx": target_unit.para_idx,
             "sent_idx": target_unit.sent_idx,
+            "voice": self.combo_voice.currentText(),
             "speed": self._current_speed(),
             "pitch": self._current_pitch(),
         }
@@ -1073,11 +1100,8 @@ class ReaderView(QWidget):
             saved_para = 0
             saved_sent = 0
 
-        end_page = min(len(self.doc), cur_page + 20)
-        units: list[TTSUnit] = []
-        for p_idx in range(cur_page, end_page):
-            blocks = self.doc.load_page(p_idx).get_text("blocks")
-            units.extend(build_page_units(p_idx, blocks))
+        # Replaces the entire old for-loop:
+        units = self._collect_tts_units_window(cur_page, max_pages=15)
 
         if not units:
             self._on_tts_status("TTS Warning: No readable text found on this page.")
@@ -1124,8 +1148,11 @@ class ReaderView(QWidget):
             self.btn_tts_play_pause.setText("▶")
             self.btn_tts_play_pause.setToolTip("Play / Resume TTS")
             prev_page = self.canvas.active_tts_page
+            
             self.canvas.active_tts_page = None
             self.canvas.active_tts_sentence = None
+            self.canvas.active_tts_text = None
+
             if prev_page is not None:
                 self.canvas.invalidate_page(prev_page)
 
@@ -1147,7 +1174,8 @@ class ReaderView(QWidget):
         prev_page = self.canvas.active_tts_page
         self.canvas.active_tts_page = page_idx
         self.canvas.active_tts_sentence = sentence_text
-
+        self.canvas.active_tts_text = sentence_text
+        
         if self.current_book:
             self.current_book["tts_state"] = {
                 "page": page_idx,
@@ -1219,6 +1247,8 @@ class ReaderView(QWidget):
         prev_page = self.canvas.active_tts_page
         self.canvas.active_tts_page = None
         self.canvas.active_tts_sentence = None
+        self.canvas.active_tts_text = None
+        
         if prev_page is not None:
             self.canvas.invalidate_page(prev_page)
         self.btn_tts_play_pause.setText("▶")

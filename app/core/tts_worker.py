@@ -157,6 +157,27 @@ def build_page_units(page_idx: int, blocks: list) -> list[TTSUnit]:
 
     return units
 
+def extract_page_tts_units(
+    doc,
+    page_idx: int,
+    filepath: str = "",
+    allow_ocr: bool = True,
+) -> tuple[list[TTSUnit], bool]:
+    """
+    Extracts TTSUnits for page_idx using HybridOCREngine:
+    - Automatically strips PDF headers/footers & standalone page numbers
+    - Applies C-level de-hyphenation & multi-column reading order sort
+    - Automatically falls back to disk-cached Tesseract OCR on scanned pages
+    Returns: (units, used_ocr)
+    """
+    from app.core.ocr_engine import HybridOCREngine
+
+    page = doc.load_page(page_idx)
+    blocks, used_ocr = HybridOCREngine.extract_clean_blocks(
+        page, page_idx, filepath=filepath, allow_ocr=allow_ocr
+    )
+    units = build_page_units(page_idx, blocks)
+    return units, used_ocr
 
 class NeuralTTSWorker(QThread):
     """
