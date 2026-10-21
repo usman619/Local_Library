@@ -3,7 +3,9 @@ import sys
 import ctypes
 
 # Configure Linux environment BEFORE importing PySide6, PyMuPDF, or audio libraries.
-os.environ["CUDA_VISIBLE_DEVICES"] = "-1"
+# NOTE: LIBGL / QT_QUICK_BACKEND force Qt to use *software* OpenGL rendering
+# (avoids Mesa/driver issues), but we intentionally leave CUDA_VISIBLE_DEVICES
+# unset so PyTorch can still use the GPU for neural TTS inference (Qwen3-TTS, etc.).
 os.environ["LIBGL_ALWAYS_SOFTWARE"] = "1"
 os.environ["QT_QUICK_BACKEND"] = "software"
 

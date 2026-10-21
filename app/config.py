@@ -149,4 +149,14 @@ TTS_VOICES = [
     "kokoro:am_michael (Local Kokoro — Michael Narrator Male)",
     "kokoro:bf_emma (Local Kokoro — Emma British Female)",
     "kokoro:bm_george (Local Kokoro — George British Male)",
+    # --- Local Offline Qwen3-TTS 0.6B CustomVoice ---
+    # "qwen:aiden (Local Qwen3 — Aiden Sunny American Male)",
+    # "qwen:ryan (Local Qwen3 — Ryan Dynamic English Male)",
+    # "qwen:serena (Local Qwen3 — Serena Warm Gentle Female)",
+    # "qwen:vivian (Local Qwen3 — Vivian Bright Edgy Female)",
+    # "qwen:dylan (Local Qwen3 — Dylan Clear Youthful Male)",
+    # "qwen:eric (Local Qwen3 — Eric Lively Husky Male)",
+    # "qwen:uncle_fu (Local Qwen3 — Uncle Fu Mellow Deep Male)",
+    # "qwen:ono_anna (Local Qwen3 — Ono Anna Playful Japanese Female)",
+    # "qwen:sohee (Local Qwen3 — Sohee Warm Korean Female)",
 ]

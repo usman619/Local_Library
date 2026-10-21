@@ -5,6 +5,7 @@ import time
 import shutil
 import asyncio
 import tempfile
+import threading
 import subprocess
 from dataclasses import dataclass
 from concurrent.futures import ThreadPoolExecutor, Future
@@ -17,6 +18,58 @@ try:
 except ImportError:
     if os.path.exists("/etc/ssl/certs/ca-certificates.crt"):
         os.environ.setdefault("SSL_CERT_FILE", "/etc/ssl/certs/ca-certificates.crt")
+
+
+# _GLOBAL_QWEN_MODEL = None
+_GLOBAL_KOKORO_PIPELINE = None
+_GLOBAL_MODEL_LOCK = threading.Lock()
+
+
+# def _get_qwen_model(status_callback=None):
+#     """
+#     Thread-safe singleton loader for Qwen3-TTS 0.6B CustomVoice configured for GPU ONLY (cuda:0).
+#     Directly targets GPU compute as requested.
+#     """
+#     global _GLOBAL_QWEN_MODEL
+#     with _GLOBAL_MODEL_LOCK:
+#         if _GLOBAL_QWEN_MODEL is not None:
+#             return _GLOBAL_QWEN_MODEL
+
+#         import torch
+#         from qwen_tts import Qwen3TTSModel
+
+#         if not torch.cuda.is_available():
+#             raise RuntimeError("CUDA is not available on this system. Qwen3-TTS is configured for GPU ONLY.")
+
+#         os.environ.setdefault("PYTORCH_CUDA_ALLOC_CONF", "expandable_segments:True")
+
+#         # Determine precision: bfloat16 for Ampere+ (SM 80+), float16 for Pascal/Turing (SM 60-75)
+#         cap = torch.cuda.get_device_capability(0)
+#         dtype = torch.bfloat16 if cap[0] >= 8 else torch.float16
+
+#         if status_callback:
+#             gpu_name = torch.cuda.get_device_name(0)
+#             status_callback(f"⏳ Initializing Qwen3-TTS on GPU ({gpu_name})...")
+
+#         _GLOBAL_QWEN_MODEL = Qwen3TTSModel.from_pretrained(
+#             "Qwen/Qwen3-TTS-12Hz-0.6B-CustomVoice",
+#             device_map="cuda:0",
+#             dtype=dtype,
+#             attn_implementation="sdpa",
+#         )
+#         return _GLOBAL_QWEN_MODEL
+
+
+def _get_kokoro_pipeline(lang_code: str):
+    """Thread-safe singleton loader for Kokoro TTS pipeline (runs on GPU with ~318 MB VRAM)."""
+    global _GLOBAL_KOKORO_PIPELINE
+    with _GLOBAL_MODEL_LOCK:
+        if _GLOBAL_KOKORO_PIPELINE is None or getattr(_GLOBAL_KOKORO_PIPELINE, "lang_code", "") != lang_code:
+            import torch
+            from kokoro import KPipeline
+            device = "cuda:0" if torch.cuda.is_available() else "cpu"
+            _GLOBAL_KOKORO_PIPELINE = KPipeline(lang_code=lang_code, device=device)
+        return _GLOBAL_KOKORO_PIPELINE
 
 
 @dataclass
@@ -139,7 +192,6 @@ class NeuralTTSWorker(QThread):
         self._param_version = 0
         self._active_proc: subprocess.Popen | None = None
         self._temp_dir = tempfile.mkdtemp(prefix="locallibrary_tts_")
-        self._kokoro_pipeline = None
         self._last_error: str = ""
 
     @staticmethod
@@ -168,6 +220,8 @@ class NeuralTTSWorker(QThread):
             changed = True
         if changed:
             self._param_version += 1
+            # Kill current playback immediately so the new voice takes effect on this sentence!
+            self._kill_active_audio()
 
     # Backward-compatible aliases in case ReaderView calls set_speed / set_pitch
     def set_speed(self, speed: float):
@@ -222,15 +276,23 @@ class NeuralTTSWorker(QThread):
             return None
 
         engine, voice_id = self._parse_voice_spec(voice_spec)
+        if engine == "qwen":
+            wav_file = os.path.join(self._temp_dir, f"unit_{idx}_v{version}_{voice_id}.wav")
+            if os.path.exists(wav_file) and os.path.getsize(wav_file) > 256:
+                return wav_file
+            if self._synthesize_qwen(spoken_text, voice_id, speed, wav_file):
+                return wav_file
+            return None
+
         if engine == "kokoro":
-            wav_file = os.path.join(self._temp_dir, f"unit_{idx}_v{version}.wav")
+            wav_file = os.path.join(self._temp_dir, f"unit_{idx}_v{version}_{voice_id}.wav")
             if os.path.exists(wav_file) and os.path.getsize(wav_file) > 256:
                 return wav_file
             if self._synthesize_kokoro(spoken_text, voice_id, speed, wav_file):
                 return wav_file
-            voice_id = "en-US-AriaNeural"
+            return None
 
-        mp3_file = os.path.join(self._temp_dir, f"unit_{idx}_v{version}.mp3")
+        mp3_file = os.path.join(self._temp_dir, f"unit_{idx}_v{version}_{voice_id}.mp3")
         if os.path.exists(mp3_file) and os.path.getsize(mp3_file) > 256:
             return mp3_file
 
@@ -295,20 +357,19 @@ class NeuralTTSWorker(QThread):
         self, text: str, voice_id: str, speed: float, out_wav: str
     ) -> bool:
         try:
-            from kokoro import KPipeline
             import soundfile as sf
             import numpy as np
 
-            if self._kokoro_pipeline is None:
-                lang_code = "b" if voice_id.startswith("b") else "a"
-                self._kokoro_pipeline = KPipeline(lang_code=lang_code)
+            lang_code = "b" if voice_id.startswith("b") else "a"
+            pipeline = _get_kokoro_pipeline(lang_code)
 
             audio_segments = []
-            for _gs, _ps, audio in self._kokoro_pipeline(
-                text, voice=voice_id, speed=speed
-            ):
-                if audio is not None:
-                    audio_segments.append(audio)
+            with _GLOBAL_MODEL_LOCK:
+                for _gs, _ps, audio in pipeline(
+                    text, voice=voice_id, speed=speed
+                ):
+                    if audio is not None:
+                        audio_segments.append(audio)
             if audio_segments:
                 full_audio = np.concatenate(audio_segments)
                 sf.write(out_wav, full_audio, 24000)
@@ -316,6 +377,40 @@ class NeuralTTSWorker(QThread):
         except Exception as e:
             self._last_error = f"Kokoro error: {e}"
         return False
+
+    # def _synthesize_qwen(
+    #     self, text: str, speaker: str, speed: float, out_wav: str
+    # ) -> bool:
+    #     """Synthesize speech using Qwen3-TTS 0.6B CustomVoice (local offline)."""
+    #     try:
+    #         import soundfile as sf
+
+    #         model = _get_qwen_model(status_callback=self.status_changed.emit)
+
+    #         # Map speed slider (0.5–2.0) to a natural instruction
+    #         if speed <= 0.7:
+    #             speed_instr = "Speak slowly and deliberately."
+    #         elif speed >= 1.5:
+    #             speed_instr = "Speak quickly with energy."
+    #         else:
+    #             speed_instr = "Speak at a natural, comfortable pace."
+
+    #         with _GLOBAL_MODEL_LOCK:
+    #             wavs, sr = model.generate_custom_voice(
+    #                 text=[text],
+    #                 language=["auto"],
+    #                 speaker=[speaker],
+    #                 instruct=[speed_instr],
+    #             )
+    #         if wavs is not None and len(wavs) > 0 and len(wavs[0]) > 0:
+    #             sf.write(out_wav, wavs[0], sr)
+    #             import torch
+    #             if torch.cuda.is_available():
+    #                 torch.cuda.empty_cache()
+    #             return True
+    #     except Exception as e:
+    #         self._last_error = f"Qwen3-TTS error: {e}"
+    #     return False
 
     def _play_audio_file(self, filepath: str):
         """
@@ -455,9 +550,10 @@ class NeuralTTSWorker(QThread):
                     self.unit_started.emit(
                         unit.page_idx, unit.para_idx, unit.sent_idx, unit.text
                     )
+                    _eng, v_name = self._parse_voice_spec(self.voice_spec)
                     self.status_changed.emit(
-                        f"Speaking [p. {unit.page_idx + 1}]: “{unit.text[:75]}"
-                        f"{'...' if len(unit.text) > 75 else ''}”"
+                        f"Speaking [{v_name}] [p. {unit.page_idx + 1}]: “{unit.text[:70]}"
+                        f"{'...' if len(unit.text) > 70 else ''}”"
                     )
                     self._play_audio_file(audio_file)
 
@@ -465,6 +561,11 @@ class NeuralTTSWorker(QThread):
                         os.remove(audio_file)
                     except OSError:
                         pass
+
+                    # If settings/voice changed during playback, don't advance idx:
+                    # immediately replay this sentence with the new voice!
+                    if ver != self._param_version:
+                        continue
 
                     if not self.is_paused and not self._stop_requested:
                         idx += 1

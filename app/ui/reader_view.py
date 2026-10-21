@@ -1201,18 +1201,20 @@ class ReaderView(QWidget):
 
     def stop_tts(self):
         if self.tts_worker:
-            # Disconnect signals first so the dying thread's 'stopped' signal
-            # never clobbers a newly started TTS worker!
+            worker = self.tts_worker
+            self.tts_worker = None
             try:
-                self.tts_worker.status_changed.disconnect()
-                self.tts_worker.unit_started.disconnect()
-                self.tts_worker.playback_state_changed.disconnect()
+                worker.status_changed.disconnect()
+                worker.unit_started.disconnect()
+                worker.playback_state_changed.disconnect()
             except Exception:
                 pass
-            if self.tts_worker.isRunning():
-                self.tts_worker.stop()
-                self.tts_worker.wait(600)
-            self.tts_worker = None
+            if worker.isRunning():
+                worker.stop()
+                if not hasattr(self, "_stopping_workers"):
+                    self._stopping_workers = set()
+                self._stopping_workers.add(worker)
+                worker.finished.connect(lambda w=worker: self._stopping_workers.discard(w))
 
         prev_page = self.canvas.active_tts_page
         self.canvas.active_tts_page = None
