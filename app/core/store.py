@@ -10,6 +10,14 @@ import pymupdf
 from app.config import LIBRARY_DB_FILE, COVERS_CACHE_DIR, DEFAULT_EPUB_FONTSIZE
 from app.core.epub_loader import open_clean_document
 
+from app.config import (
+    LIBRARY_DB_FILE,
+    SETTINGS_FILE,
+    COVERS_CACHE_DIR,
+    DEFAULT_EPUB_FONTSIZE,
+    TTS_VOICES,
+)
+
 SUPPORTED_EXTENSIONS = {".pdf", ".epub", ".fb2", ".mobi", ".cbz", ".xps", ".txt"}
 
 
@@ -18,8 +26,10 @@ class LibraryStore:
 
     def __init__(self):
         self.db_file = LIBRARY_DB_FILE
+        self.settings_file = SETTINGS_FILE
         self.covers_dir = COVERS_CACHE_DIR
         self.books = self._load()
+        self.settings = self._load_settings()
 
     def _load(self) -> dict:
         if self.db_file.exists():
@@ -31,6 +41,33 @@ class LibraryStore:
 
     def save(self):
         self.db_file.write_text(json.dumps(self.books, indent=2), encoding="utf-8")
+
+    def _load_settings(self) -> dict:
+        defaults = {
+            "tts_voice": TTS_VOICES[0],
+            "tts_speed": 1.0,
+            "tts_pitch": 0,
+            "tts_auto_scroll": True,
+            "theme_name": "Smart Dark (Mocha)",
+            "view_mode": "Continuous Scroll",
+        }
+        if self.settings_file.exists():
+            try:
+                loaded = json.loads(self.settings_file.read_text(encoding="utf-8"))
+                if isinstance(loaded, dict):
+                    defaults.update(loaded)
+            except Exception:
+                pass
+        return defaults
+
+    def save_settings(self, **kwargs):
+        self.settings.update(kwargs)
+        try:
+            self.settings_file.write_text(
+                json.dumps(self.settings, indent=2), encoding="utf-8"
+            )
+        except Exception:
+            pass
 
     @staticmethod
     def book_id(filepath: str) -> str:
@@ -168,8 +205,15 @@ class LibraryStore:
             "bookmarks": existing.get("bookmarks", []),
             "highlights": existing.get("highlights", []),
             "tts_state": existing.get(
-                "tts_state",
-                {"page": 0, "para_idx": 0, "sent_idx": 0, "speed": 1.0, "pitch": 0},
+            "tts_state",
+            {
+                "page": 0,
+                "para_idx": 0,
+                "sent_idx": 0,
+                "voice": self.settings.get("tts_voice", TTS_VOICES[0]),
+                "speed": self.settings.get("tts_speed", 1.0),
+                "pitch": self.settings.get("tts_pitch", 0),
+            },
             ),
             "last_opened": existing.get(
                 "last_opened", datetime.now().isoformat(timespec="minutes")

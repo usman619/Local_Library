@@ -1,7 +1,7 @@
 from pathlib import Path
 import pymupdf
 from PySide6.QtCore import Qt, QTimer, Signal, QPointF, QEvent
-from PySide6.QtGui import QColor, QKeySequence, QShortcut
+from PySide6.QtGui import QColor, QIcon, QKeySequence, QPainter, QPainterPath, QPixmap, QShortcut
 from PySide6.QtWidgets import (
     QWidget, QVBoxLayout, QHBoxLayout, QSplitter, QTabWidget,
     QTreeWidget, QTreeWidgetItem, QListWidget, QListWidgetItem,
@@ -118,6 +118,8 @@ class ReaderView(QWidget):
 
         self.toc_tree = QTreeWidget()
         self.toc_tree.setHeaderHidden(True)
+        self.toc_tree.setFocusPolicy(Qt.NoFocus)
+        self.toc_tree.setIndentation(16)
         self.toc_tree.itemClicked.connect(self._on_toc_clicked)
         self.sidebar_tabs.addTab(self.toc_tree, "Contents")
 
@@ -171,7 +173,7 @@ class ReaderView(QWidget):
         # ---- BOTTOM STATEFUL NEURAL TTS CONTROL BAR ----
         tts_bar = QFrame()
         tts_bar.setStyleSheet(
-            "background-color: #181825; border-top: 1px solid #313244; padding: 6px 12px;"
+            "QFrame { background-color: #181825; border-top: 1px solid #313244; padding: 6px 12px; }"
         )
         tts_bar_layout = QVBoxLayout(tts_bar)
         tts_bar_layout.setContentsMargins(4, 2, 4, 2)
@@ -183,7 +185,11 @@ class ReaderView(QWidget):
         controls_row.addWidget(QLabel("Voice:"))
         self.combo_voice = QComboBox()
         self.combo_voice.addItems(TTS_VOICES)
-        self.combo_voice.setToolTip("Select Neural TTS Voice")
+        self.combo_voice.setMinimumWidth(260)
+        self.combo_voice.setToolTip("Select Neural TTS Voice (saved automatically)")
+        saved_global_voice = self.store.settings.get("tts_voice", TTS_VOICES[0])
+        if saved_global_voice in TTS_VOICES:
+            self.combo_voice.setCurrentText(saved_global_voice)
         self.combo_voice.currentTextChanged.connect(self._on_voice_changed)
         controls_row.addWidget(self.combo_voice)
 
@@ -194,13 +200,17 @@ class ReaderView(QWidget):
 
         self.btn_prev_para = QPushButton("⏮")
         self.btn_prev_para.setStyleSheet(icon_btn_style)
-        self.btn_prev_para.setToolTip("Previous Paragraph")
+        self.btn_prev_para.setToolTip("Previous Sentence / Paragraph")
         self.btn_prev_para.clicked.connect(self.tts_prev_paragraph)
         controls_row.addWidget(self.btn_prev_para)
 
         self.btn_tts_play_pause = QPushButton("▶")
-        self.btn_tts_play_pause.setStyleSheet(icon_btn_style)
-        self.btn_tts_play_pause.setToolTip("Play / Resume TTS")
+        self.btn_tts_play_pause.setStyleSheet(
+            "QPushButton { padding: 0px; font-size: 15px; min-width: 40px; max-width: 40px; "
+            "min-height: 30px; max-height: 30px; background-color: #89B4FA; color: #11111B; border: none; }"
+            "QPushButton:hover { background-color: #B4BEFE; }"
+        )
+        self.btn_tts_play_pause.setToolTip("Play / Pause TTS")
         self.btn_tts_play_pause.clicked.connect(self.toggle_tts_play_pause)
         controls_row.addWidget(self.btn_tts_play_pause)
 
@@ -212,52 +222,69 @@ class ReaderView(QWidget):
 
         self.btn_next_para = QPushButton("⏭")
         self.btn_next_para.setStyleSheet(icon_btn_style)
-        self.btn_next_para.setToolTip("Next Paragraph")
+        self.btn_next_para.setToolTip("Next Sentence / Paragraph")
         self.btn_next_para.clicked.connect(self.tts_next_paragraph)
         controls_row.addWidget(self.btn_next_para)
 
-        controls_row.addSpacing(10)
+        controls_row.addSpacing(8)
 
         controls_row.addWidget(QLabel("Speed:"))
         self.slider_speed = QSlider(Qt.Horizontal)
         self.slider_speed.setRange(5, 20)
-        self.slider_speed.setValue(10)
-        self.slider_speed.setFixedWidth(130)
+        init_speed = int(round(float(self.store.settings.get("tts_speed", 1.0)) * 10))
+        self.slider_speed.setValue(max(5, min(20, init_speed)))
+        self.slider_speed.setFixedWidth(115)
         self.slider_speed.setToolTip("Adjust Speaking Speed (0.5x to 2.0x)")
         self.slider_speed.valueChanged.connect(self._on_speed_changed)
         controls_row.addWidget(self.slider_speed)
 
-        self.lbl_speed_val = QLabel("1.0x")
-        self.lbl_speed_val.setMinimumWidth(54)
-        self.lbl_speed_val.setAlignment(Qt.AlignLeft | Qt.AlignVCenter)
-        self.lbl_speed_val.setStyleSheet("color: #89B4FA; font-weight: bold; padding-left: 2px;")
+        self.lbl_speed_val = QLabel(f"{self.slider_speed.value() / 10.0:.1f}x")
+        self.lbl_speed_val.setMinimumWidth(42)
+        self.lbl_speed_val.setStyleSheet("color: #89B4FA; font-weight: bold;")
         controls_row.addWidget(self.lbl_speed_val)
 
-        controls_row.addSpacing(6)
+        controls_row.addSpacing(4)
 
         controls_row.addWidget(QLabel("Pitch:"))
         self.slider_pitch = QSlider(Qt.Horizontal)
         self.slider_pitch.setRange(-6, 6)
-        self.slider_pitch.setValue(0)
-        self.slider_pitch.setFixedWidth(130)
+        init_pitch = int(self.store.settings.get("tts_pitch", 0))
+        self.slider_pitch.setValue(max(-6, min(6, init_pitch)))
+        self.slider_pitch.setFixedWidth(105)
         self.slider_pitch.setToolTip("Adjust Voice Pitch (-6 to +6 semitones)")
         self.slider_pitch.valueChanged.connect(self._on_pitch_changed)
         controls_row.addWidget(self.slider_pitch)
 
-        self.lbl_pitch_val = QLabel("0st")
-        self.lbl_pitch_val.setMinimumWidth(54)
-        self.lbl_pitch_val.setAlignment(Qt.AlignLeft | Qt.AlignVCenter)
-        self.lbl_pitch_val.setStyleSheet("color: #89B4FA; font-weight: bold; padding-left: 2px;")
+        self.lbl_pitch_val = QLabel(f"{self.slider_pitch.value():+d}st" if self.slider_pitch.value() != 0 else "0st")
+        self.lbl_pitch_val.setMinimumWidth(40)
+        self.lbl_pitch_val.setStyleSheet("color: #89B4FA; font-weight: bold;")
         controls_row.addWidget(self.lbl_pitch_val)
+
+        btn_reset_tts = QPushButton("Reset")
+        # btn_reset_tts.setFixedWidth(30)
+        btn_reset_tts.setToolTip("Reset Speed (1.0x) and Pitch (0st) to Default")
+        btn_reset_tts.clicked.connect(self._reset_tts_sliders)
+        controls_row.addWidget(btn_reset_tts)
+
+        self.btn_auto_scroll = QPushButton("Follow")
+        self.btn_auto_scroll.setCheckable(True)
+        self.btn_auto_scroll.setChecked(bool(self.store.settings.get("tts_auto_scroll", True)))
+        self.btn_auto_scroll.setToolTip("Automatically scroll the page to follow the spoken sentence")
+        self.btn_auto_scroll.toggled.connect(
+            lambda checked: self.store.save_settings(tts_auto_scroll=checked)
+        )
+        controls_row.addWidget(self.btn_auto_scroll)
 
         controls_row.addStretch(1)
         tts_bar_layout.addLayout(controls_row)
 
-        self.lbl_tts_status = QLabel("TTS Ready — Drag over any text on the page to Copy or Highlight")
+        self.lbl_tts_status = QLabel("TTS Ready — Select any text and click '▶ Read' or press ▶ to start")
         self.lbl_tts_status.setStyleSheet("color: #A6E3A1; font-size: 12px;")
         tts_bar_layout.addWidget(self.lbl_tts_status)
 
         root.addWidget(tts_bar)
+
+        
 
     def _setup_shortcuts(self):
         self.shortcut_find = QShortcut(QKeySequence("Ctrl+F"), self)
@@ -405,10 +432,24 @@ class ReaderView(QWidget):
         self.store.touch_last_opened(filepath)
 
         tts_state = self.current_book.get("tts_state", {})
-        saved_speed = float(tts_state.get("speed", 1.0))
-        saved_pitch = int(tts_state.get("pitch", 0))
-        self.slider_speed.setValue(int(round(saved_speed * 10)))
-        self.slider_pitch.setValue(saved_pitch)
+        saved_voice = tts_state.get("voice") or self.store.settings.get("tts_voice", TTS_VOICES[0])
+        saved_speed = float(tts_state.get("speed", self.store.settings.get("tts_speed", 1.0)))
+        saved_pitch = int(tts_state.get("pitch", self.store.settings.get("tts_pitch", 0)))
+
+        self.combo_voice.blockSignals(True)
+        if saved_voice in TTS_VOICES:
+            self.combo_voice.setCurrentText(saved_voice)
+        self.combo_voice.blockSignals(False)
+
+        self.slider_speed.blockSignals(True)
+        self.slider_speed.setValue(max(5, min(20, int(round(saved_speed * 10)))))
+        self.lbl_speed_val.setText(f"{saved_speed:.1f}x")
+        self.slider_speed.blockSignals(False)
+
+        self.slider_pitch.blockSignals(True)
+        self.slider_pitch.setValue(max(-6, min(6, saved_pitch)))
+        self.lbl_pitch_val.setText(f"{saved_pitch:+d}st" if saved_pitch != 0 else "0st")
+        self.slider_pitch.blockSignals(False)
 
         self._populate_toc()
         self._populate_bookmarks()
@@ -514,11 +555,37 @@ class ReaderView(QWidget):
     # -----------------------------------------------------------------
     # TOC, BOOKMARKS & MULTI-COLOR HIGHLIGHTS
     # -----------------------------------------------------------------
+    @staticmethod
+    def _make_arrow_icon(direction: str, color: str = "#7F849C", size: int = 12) -> QIcon:
+        """Create a small arrow QIcon using QPainter (right ▶ or down ▼)."""
+        pixmap = QPixmap(size, size)
+        pixmap.fill(Qt.transparent)
+        painter = QPainter(pixmap)
+        painter.setRenderHint(QPainter.Antialiasing)
+        painter.setBrush(QColor(color))
+        painter.setPen(Qt.NoPen)
+        path = QPainterPath()
+        if direction == "right":
+            path.moveTo(3, 1)
+            path.lineTo(size - 2, size / 2)
+            path.lineTo(3, size - 1)
+        else:  # down
+            path.moveTo(1, 3)
+            path.lineTo(size - 1, 3)
+            path.lineTo(size / 2, size - 2)
+        path.closeSubpath()
+        painter.drawPath(path)
+        painter.end()
+        return QIcon(pixmap)
+
     def _populate_toc(self):
         self.toc_tree.clear()
         self._toc_items: list[tuple[int, QTreeWidgetItem]] = []
         if not self.doc:
             return
+        # Build the arrow icons once
+        self._icon_collapsed = self._make_arrow_icon("right", "#7F849C")
+        self._icon_expanded = self._make_arrow_icon("down", "#7F849C")
         toc = self.doc.get_toc()
         stack = [(0, self.toc_tree.invisibleRootItem())]
         for lvl, title, page_num in toc:
@@ -531,11 +598,75 @@ class ReaderView(QWidget):
             parent.addChild(item)
             stack.append((lvl, item))
             self._toc_items.append((page_idx, item))
+        # Expand tree, then set icons to match state
         self.toc_tree.expandToDepth(1)
+        self._update_toc_icons()
+        # Connect expand/collapse signals (only once)
+        if not getattr(self, '_toc_signals_connected', False):
+            self.toc_tree.itemExpanded.connect(self._on_toc_item_expanded)
+            self.toc_tree.itemCollapsed.connect(self._on_toc_item_collapsed)
+            self._toc_signals_connected = True
+
+    def _update_toc_icons(self):
+        """Set expand/collapse arrow icons on TOC items that have children."""
+        for _p, item in self._toc_items:
+            if item.childCount() > 0:
+                icon = self._icon_expanded if item.isExpanded() else self._icon_collapsed
+                item.setIcon(0, icon)
+            else:
+                item.setIcon(0, QIcon())
+
+    def _on_toc_item_expanded(self, item: QTreeWidgetItem):
+        """Swap to down-arrow icon when a TOC item is expanded."""
+        if item.childCount() > 0:
+            item.setIcon(0, self._icon_expanded)
+
+    def _on_toc_item_collapsed(self, item: QTreeWidgetItem):
+        """Swap to right-arrow icon when a TOC item is collapsed."""
+        if item.childCount() > 0:
+            item.setIcon(0, self._icon_collapsed)
+
+    def _highlight_toc_item(self, active_item: QTreeWidgetItem):
+        """Applies a single unified highlight to active_item and clears old bold/color states."""
+        if not getattr(self, "_toc_items", None):
+            return
+        
+        self.toc_tree.blockSignals(True)
+        # Clear all selection first to avoid stale CSS :selected highlights
+        self.toc_tree.clearSelection()
+        
+        for _p, item in self._toc_items:
+            font = item.font(0)
+            is_curr = item is active_item
+            font.setBold(is_curr)
+            item.setFont(0, font)
+            item.setForeground(0, QColor("#89B4FA" if is_curr else "#CDD6F4"))
+            # Set background explicitly: active item gets subtle highlight, others get transparent
+            if is_curr:
+                item.setBackground(0, QColor(49, 50, 68, 150))
+            else:
+                item.setBackground(0, QColor(0, 0, 0, 0))
+        
+        parent = active_item.parent()
+        while parent is not None:
+            parent.setExpanded(True)
+            # Update icon since signals are blocked
+            if parent.childCount() > 0:
+                parent.setIcon(0, self._icon_expanded)
+            parent = parent.parent()
+
+        self.toc_tree.setCurrentItem(active_item)
+        self.toc_tree.scrollToItem(active_item, QTreeWidget.PositionAtCenter)
+        self.toc_tree.blockSignals(False)
 
     def _sync_toc_to_page(self, current_page_idx: int):
         """Highlights and scrolls to the active chapter/section in the Contents tree while scrolling."""
         if not getattr(self, "_toc_items", None):
+            return
+
+        # If the currently selected TOC item is already on this exact page, keep it highlighted!
+        curr = self.toc_tree.currentItem()
+        if curr is not None and curr.data(0, Qt.UserRole) == current_page_idx:
             return
 
         active_item: QTreeWidgetItem | None = None
@@ -548,31 +679,16 @@ class ReaderView(QWidget):
         if active_item is None:
             active_item = self._toc_items[0][1]
 
-        if self.toc_tree.currentItem() is active_item:
-            return
-
-        # Block signals briefly so programmatically selecting the item doesn't trigger a page jump
-        self.toc_tree.blockSignals(True)
-        for _p, item in self._toc_items:
-            font = item.font(0)
-            is_curr = item is active_item
-            font.setBold(is_curr)
-            item.setFont(0, font)
-            item.setForeground(0, QColor("#89B4FA" if is_curr else "#CDD6F4"))
-
-        # Expand parent nodes so the active subsection is visible
-        parent = active_item.parent()
-        while parent is not None:
-            parent.setExpanded(True)
-            parent = parent.parent()
-
-        self.toc_tree.setCurrentItem(active_item)
-        self.toc_tree.scrollToItem(active_item, QTreeWidget.PositionAtCenter)
-        self.toc_tree.blockSignals(False)
+        if self.toc_tree.currentItem() is not active_item:
+            self._highlight_toc_item(active_item)
 
     def _on_toc_clicked(self, item: QTreeWidgetItem, _col: int):
+        # Toggle expand/collapse when clicking items with children
+        if item.childCount() > 0:
+            item.setExpanded(not item.isExpanded())
         page_idx = item.data(0, Qt.UserRole)
         if page_idx is not None:
+            self._highlight_toc_item(item)
             self.jump_to_page(int(page_idx))
 
     def toggle_bookmark(self):
@@ -782,27 +898,47 @@ class ReaderView(QWidget):
     def _current_pitch(self) -> int:
         return int(self.slider_pitch.value())
 
-    def _on_voice_changed(self, text: str):
-        if self.tts_worker and self.tts_worker.isRunning():
-            self.tts_worker.set_voice(text.split(" ")[0])
+    def _save_current_tts_prefs(self):
+        voice = self.combo_voice.currentText()
+        speed = self._current_speed()
+        pitch = self._current_pitch()
 
-    def _on_speed_changed(self, value: int):
-        speed = round(value / 10.0, 1)
+        # 1. Save globally for future books & sessions
+        self.store.save_settings(
+            tts_voice=voice,
+            tts_speed=speed,
+            tts_pitch=pitch,
+        )
+        # 2. Save in current book's tts_state
+        if self.current_book:
+            tts_state = self.current_book.setdefault("tts_state", {})
+            tts_state["voice"] = voice
+            tts_state["speed"] = speed
+            tts_state["pitch"] = pitch
+            self.store.save()
+
+        # 3. Hot-update running worker so upcoming prefetched sentences use the new settings immediately
+        if self.tts_worker and self.tts_worker.isRunning():
+            self.tts_worker.update_live_settings(
+                voice_spec=voice, speed=speed, pitch=pitch
+            )
+
+    def _on_voice_changed(self, _text: str):
+        self._save_current_tts_prefs()
+
+    def _on_speed_changed(self, val: int):
+        speed = val / 10.0
         self.lbl_speed_val.setText(f"{speed:.1f}x")
-        if self.current_book:
-            self.current_book.setdefault("tts_state", {})["speed"] = speed
-            self.store.save()
-        if self.tts_worker and self.tts_worker.isRunning():
-            self.tts_worker.set_speed(speed)
+        self._save_current_tts_prefs()
 
-    def _on_pitch_changed(self, value: int):
-        self.lbl_pitch_val.setText(f"{value:+d}st" if value != 0 else "0st")
-        if self.current_book:
-            self.current_book.setdefault("tts_state", {})["pitch"] = int(value)
-            self.store.save()
-        if self.tts_worker and self.tts_worker.isRunning():
-            self.tts_worker.set_pitch(value)
+    def _on_pitch_changed(self, val: int):
+        self.lbl_pitch_val.setText(f"{val:+d}st" if val != 0 else "0st")
+        self._save_current_tts_prefs()
 
+    def _reset_tts_sliders(self):
+        self.slider_speed.setValue(10)
+        self.slider_pitch.setValue(0)
+        self._save_current_tts_prefs()
     @staticmethod
     def _find_matching_tts_unit_index(
         units: list[TTSUnit], page_idx: int, selected_text: str
@@ -959,28 +1095,55 @@ class ReaderView(QWidget):
         self._launch_tts_worker(units, start_index)
 
     def _launch_tts_worker(self, units: list[TTSUnit], start_index: int):
-        voice_raw = self.combo_voice.currentText().split(" ")[0]
+        self.stop_tts()
+        self.current_tts_units = units
+        voice_spec = self.combo_voice.currentText()
+        speed = self._current_speed()
+        pitch = self._current_pitch()
+
         self.tts_worker = NeuralTTSWorker(
             units=units,
             start_index=start_index,
-            voice_id=voice_raw,
-            speed=self._current_speed(),
-            pitch_semitones=self._current_pitch(),
+            voice_spec=voice_spec,
+            speed=speed,
+            pitch=pitch,
         )
         self.tts_worker.status_changed.connect(self._on_tts_status)
         self.tts_worker.unit_started.connect(self._on_tts_unit_started)
-        self.tts_worker.playback_state_changed.connect(self._on_tts_state_changed)
+        self.tts_worker.playback_state_changed.connect(self._on_tts_playback_state_changed)
         self.tts_worker.start()
 
+    def _on_tts_playback_state_changed(self, state: str):
+        if state == "playing":
+            self.btn_tts_play_pause.setText("⏸")
+            self.btn_tts_play_pause.setToolTip("Pause TTS")
+        elif state == "paused":
+            self.btn_tts_play_pause.setText("▶")
+            self.btn_tts_play_pause.setToolTip("Resume TTS")
+        else:
+            self.btn_tts_play_pause.setText("▶")
+            self.btn_tts_play_pause.setToolTip("Play / Resume TTS")
+            prev_page = self.canvas.active_tts_page
+            self.canvas.active_tts_page = None
+            self.canvas.active_tts_sentence = None
+            if prev_page is not None:
+                self.canvas.invalidate_page(prev_page)
+
     def tts_prev_paragraph(self):
-        if self.tts_worker and self.tts_worker.isRunning():
-            self.tts_worker.prev_paragraph()
+        if not self.tts_worker or not self.current_tts_units:
+            return
+        new_idx = max(0, self.tts_worker.current_index - 1)
+        self._launch_tts_worker(self.current_tts_units, new_idx)
 
     def tts_next_paragraph(self):
-        if self.tts_worker and self.tts_worker.isRunning():
-            self.tts_worker.next_paragraph()
+        if not self.tts_worker or not self.current_tts_units:
+            return
+        new_idx = min(len(self.current_tts_units) - 1, self.tts_worker.current_index + 1)
+        self._launch_tts_worker(self.current_tts_units, new_idx)
 
-    def _on_tts_unit_started(self, page_idx: int, para_idx: int, sent_idx: int, sentence_text: str):
+    def _on_tts_unit_started(
+        self, page_idx: int, para_idx: int, sent_idx: int, sentence_text: str
+    ):
         prev_page = self.canvas.active_tts_page
         self.canvas.active_tts_page = page_idx
         self.canvas.active_tts_sentence = sentence_text
@@ -990,23 +1153,31 @@ class ReaderView(QWidget):
                 "page": page_idx,
                 "para_idx": para_idx,
                 "sent_idx": sent_idx,
+                "voice": self.combo_voice.currentText(),
                 "speed": self._current_speed(),
                 "pitch": self._current_pitch(),
             }
             self.store.save()
 
-        # In Two-Column Spread mode, only jump if page_idx is not already one of the 2 visible pages
-        visible_spread = self.canvas.get_active_paginated_pages()
-        if self.canvas.view_mode == "continuous":
-            if self.current_book and page_idx != self.current_book.get("current_page", 0):
-                self.jump_to_page(page_idx)
-        else:
-            if page_idx not in visible_spread:
-                self.jump_to_page(page_idx)
-
         if prev_page is not None and prev_page != page_idx:
             self.canvas.invalidate_page(prev_page)
         self.canvas.invalidate_page(page_idx)
+
+        # Smoothly auto-scroll to keep the active spoken sentence visible
+        if getattr(self, "btn_auto_scroll", None) and self.btn_auto_scroll.isChecked():
+            if page_idx != self.canvas.current_page:
+                self.jump_to_page(page_idx)
+            elif self.canvas.view_mode == "continuous" and self.doc:
+                page = self.doc.load_page(page_idx)
+                from app.core.renderer import PageRenderer
+                rects = PageRenderer._find_text_rects(page, sentence_text)
+                if rects:
+                    r = rects[0]
+                    vp_rect = self.canvas._pdf_rect_to_viewport(page_idx, r)
+                    vp_h = self.canvas.viewport().height()
+                    # If sentence is near the bottom 25% or above top 15% of viewport, scroll smoothly
+                    if vp_rect.bottom() > vp_h * 0.78 or vp_rect.top() < vp_h * 0.12:
+                        self.canvas.ensure_page_rect_visible(page_idx, r)
 
     def _on_tts_state_changed(self, state: str):
         if state == "playing":

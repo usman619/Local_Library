@@ -8,6 +8,7 @@ APP_DATA_DIR = DATA_HOME / "local_library"
 COVERS_CACHE_DIR = CACHE_HOME / "local_library" / "covers"
 SANITIZED_EPUB_CACHE_DIR = CACHE_HOME / "local_library" / "sanitized_epubs"
 LIBRARY_DB_FILE = APP_DATA_DIR / "library.json"
+SETTINGS_FILE = APP_DATA_DIR / "settings.json"
 
 APP_DATA_DIR.mkdir(parents=True, exist_ok=True)
 COVERS_CACHE_DIR.mkdir(parents=True, exist_ok=True)
@@ -119,11 +120,33 @@ HIGHLIGHT_COLORS = {
     "pink":   {"label": "Pink",   "rgb": (245, 194, 231), "hex": "#F5C2E7"},
 }
 
-# Neural TTS Voices
+# Expanded Curated Neural TTS Voices (Edge-TTS Cloud + Kokoro Local)
 TTS_VOICES = [
-    "edge:en-US-AriaNeural (Edge-TTS Neural Female)",
-    "edge:en-US-AndrewMultilingualNeural (Edge-TTS Neural Male)",
-    "edge:en-GB-SoniaNeural (Edge-TTS British Female)",
-    "kokoro:af_heart (Kokoro Local - Natural Female)",
-    "kokoro:am_adam (Kokoro Local - Warm Male)",
+    # --- US Natural & Multilingual Studio Voices ---
+    "edge:en-US-AvaMultilingualNeural (US — Ava Expressive Female)",
+    "edge:en-US-AndrewMultilingualNeural (US — Andrew Warm Narrator Male)",
+    "edge:en-US-BrianMultilingualNeural (US — Brian Clear Audiobook Male)",
+    "edge:en-US-EmmaMultilingualNeural (US — Emma Conversational Female)",
+    "edge:en-US-AriaNeural (US — Aria Crisp Female)",
+    "edge:en-US-GuyNeural (US — Guy Deep Male)",
+    "edge:en-US-ChristopherNeural (US — Christopher Documentary Male)",
+    "edge:en-US-JennyNeural (US — Jenny Soft Female)",
+    "edge:en-US-SteffanNeural (US — Steffan Technical Male)",
+    # --- UK British Voices ---
+    "edge:en-GB-SoniaNeural (UK — Sonia British Female)",
+    "edge:en-GB-RyanNeural (UK — Ryan British Narrator Male)",
+    "edge:en-GB-LibbyNeural (UK — Libby Warm British Female)",
+    # --- International English Voices ---
+    "edge:en-AU-NatashaNeural (AU — Natasha Australian Female)",
+    "edge:en-AU-WilliamNeural (AU — William Australian Male)",
+    "edge:en-CA-ClaraNeural (CA — Clara Canadian Female)",
+    "edge:en-IN-NeerjaExpressiveNeural (IN — Neerja Expressive Female)",
+    "edge:en-PK-UzmaNeural (PK — Uzma Pakistani English Female)",
+    # --- Local Offline Kokoro Voices ---
+    "kokoro:af_heart (Local Kokoro — Heart Natural Female)",
+    "kokoro:af_bella (Local Kokoro — Bella Studio Female)",
+    "kokoro:am_adam (Local Kokoro — Adam Warm Male)",
+    "kokoro:am_michael (Local Kokoro — Michael Narrator Male)",
+    "kokoro:bf_emma (Local Kokoro — Emma British Female)",
+    "kokoro:bm_george (Local Kokoro — George British Male)",
 ]

@@ -110,20 +110,35 @@ class PageRenderer:
 
     @staticmethod
     def _find_text_rects(page: pymupdf.Page, text: str) -> list[pymupdf.Rect]:
-        cleaned = " ".join(text.split())
-        if not cleaned:
+        """Finds bounding rectangles for a sentence or highlight on a page, even across line wraps."""
+        if not text or not text.strip():
             return []
-        rects = page.search_for(cleaned[:90])
+        clean = " ".join(text.split()).strip()
+
+        # 1. Try direct search first
+        rects = page.search_for(clean)
         if rects:
             return rects
 
-        words = cleaned.split(" ")
-        found = []
-        for i in range(0, min(len(words), 24), 6):
-            chunk = " ".join(words[i:i + 6])
-            if len(chunk) >= 8:
-                found.extend(page.search_for(chunk))
-        return found
+        # 2. Try first 65 characters
+        if len(clean) > 45:
+            rects = page.search_for(clean[:65].strip())
+            if rects:
+                return rects
+
+        # 3. Multi-chunk search (handles hyphenated line breaks and formatting splits across lines)
+        words = clean.split()
+        if len(words) >= 3:
+            found_rects: list[pymupdf.Rect] = []
+            chunk_size = 5
+            for i in range(0, min(len(words), 30), chunk_size):
+                chunk = " ".join(words[i : i + chunk_size])
+                if len(chunk) >= 4:
+                    found_rects.extend(page.search_for(chunk))
+            if found_rects:
+                return found_rects
+
+        return []
 
     @staticmethod
     def _apply_duotone_lut(img: np.ndarray, bg_rgb: tuple, fg_rgb: tuple) -> np.ndarray:
