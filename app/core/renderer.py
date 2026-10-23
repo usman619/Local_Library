@@ -1,7 +1,7 @@
 import numpy as np
 import pymupdf
 from PySide6.QtCore import Qt, QRectF
-from PySide6.QtGui import QImage, QPixmap, QPainter, QColor, QPen, QFont
+from PySide6.QtGui import QImage, QPixmap, QPainter, QColor, QPen
 
 from app.config import THEMES, HIGHLIGHT_COLORS
 
@@ -12,40 +12,58 @@ class PageRenderer:
     - Smart Dark Mode & Sepia/Nord NumPy LUT color filters (including preserve_images mode)
     - Multi-color user highlights with custom note badges
     - In-book search match highlights (orange overlays)
-    - Real-time sky-blue TTS sentence highlights (both native digital text and cached Tesseract OCR)
+    - Real-time sky-blue TTS sentence highlights with bounding box clipping
     """
 
     @staticmethod
     def _find_text_rects(
-        page: pymupdf.Page, text: str, filepath: str = "", page_idx: int = 0
+        page: pymupdf.Page,
+        text: str,
+        filepath: str = "",
+        page_idx: int = 0,
+        clip_bbox: tuple[float, float, float, float] | None = None,
     ) -> list[pymupdf.Rect]:
-        """Finds bounding rectangles for a sentence or highlight on both digital and scanned (OCR) pages."""
+        """
+        Finds bounding rectangles for a sentence on a page, strictly constrained
+        to clip_bbox (when provided) so TTS highlights never jump across columns or diagrams.
+        """
         if not text or not text.strip():
             return []
         clean = " ".join(text.split()).strip()
 
-        # 1. Direct native search
-        rects = page.search_for(clean)
-        if rects:
-            return rects
+        clip_rect = None
+        if clip_bbox and len(clip_bbox) == 4:
+            clip_rect = pymupdf.Rect(
+                clip_bbox[0] - 6,
+                clip_bbox[1] - 6,
+                clip_bbox[2] + 6,
+                clip_bbox[3] + 6,
+            )
 
-        # 2. First 65 characters
-        if len(clean) > 45:
-            rects = page.search_for(clean[:65].strip())
+        # 1. Search inside the exact paragraph bounding box first
+        if clip_rect is not None:
+            rects = page.search_for(clean, clip=clip_rect)
             if rects:
                 return rects
+            if len(clean) > 40:
+                rects = page.search_for(clean[:50].strip(), clip=clip_rect)
+                if rects:
+                    return rects
 
-        # 3. Multi-chunk search (handles hyphenated line breaks and multi-line wraps)
-        words = clean.split()
-        if len(words) >= 3:
-            found_rects: list[pymupdf.Rect] = []
-            chunk_size = 5
-            for i in range(0, min(len(words), 30), chunk_size):
-                chunk = " ".join(words[i : i + chunk_size])
-                if len(chunk) >= 4:
-                    found_rects.extend(page.search_for(chunk))
-            if found_rects:
-                return found_rects
+        # 2. Full-page direct search
+        rects = page.search_for(clean)
+        if rects:
+            if clip_rect is not None:
+                in_box = [r for r in rects if r.intersects(clip_rect)]
+                if in_box:
+                    return in_box
+            return [rects[0]] if len(clean) < 25 else rects
+
+        # 3. Prefix search
+        if len(clean) > 45:
+            rects = page.search_for(clean[:60].strip(), clip=clip_rect)
+            if rects:
+                return rects
 
         # 4. Scanned PDF fallback: check disk-cached Tesseract OCR word boxes
         if filepath:
@@ -59,6 +77,10 @@ class PageRenderer:
             except Exception:
                 pass
 
+        # 5. Final fallback: paragraph box
+        if clip_rect is not None:
+            return [pymupdf.Rect(clip_bbox)]
+
         return []
 
     @staticmethod
@@ -69,7 +91,6 @@ class PageRenderer:
         arr = np.frombuffer(samples, dtype=np.uint8).reshape((height, stride))
         rgb = arr[:, : width * 3].reshape((height, width, 3))
 
-        # Perceived luminance (0.0 = black text, 1.0 = white paper)
         lum = (
             0.299 * rgb[:, :, 0].astype(np.float32)
             + 0.587 * rgb[:, :, 1].astype(np.float32)
@@ -78,7 +99,6 @@ class PageRenderer:
 
         out = np.empty_like(rgb)
         for c in range(3):
-            # lum == 1.0 (white paper) -> bg_rgb[c]; lum == 0.0 (black ink) -> fg_rgb[c]
             val = fg_rgb[c] + lum * (bg_rgb[c] - fg_rgb[c])
             out[:, :, c] = np.clip(val, 0, 255).astype(np.uint8)
 
@@ -95,11 +115,8 @@ class PageRenderer:
     @classmethod
     def render_page(cls, *args, **kwargs) -> QPixmap:
         """
-        Universal HiDPI PageRenderer that accepts any positional or keyword signature:
-        - PageRenderer.render_page(page, zoom, theme_name, dpr=..., active_tts_text=..., user_highlights=..., search_query=...)
-        - PageRenderer.render_page(doc, page_idx, zoom, theme_name, ...)
+        Universal HiDPI PageRenderer that accepts any positional or keyword signature.
         """
-        # 1. Unpack positional arguments safely without ever colliding with **kwargs
         page: pymupdf.Page | None = None
         doc: pymupdf.Document | None = None
         p_idx: int = 0
@@ -123,7 +140,6 @@ class PageRenderer:
                 if len(args) >= 4 and isinstance(args[3], str):
                     theme_name = args[3]
             else:
-                # Standard call from widgets.py: (page, zoom, theme_name, ...)
                 page = first
                 doc = page.parent
                 p_idx = int(page.number)
@@ -139,7 +155,6 @@ class PageRenderer:
             doc = page.parent if page else None
             p_idx = int(page.number) if page else 0
 
-        # 2. Extract keyword overlay parameters
         active_tts_page = kwargs.get("active_tts_page")
         tts_text = (
             kwargs.get("active_tts_text")
@@ -156,7 +171,6 @@ class PageRenderer:
         )
         search_query = str(kwargs.get("search_query", "") or "")
 
-        # 3. Render base page pixmap at HiDPI scale (zoom * dpr)
         effective_scale = max(0.1, zoom * dpr)
         mat = pymupdf.Matrix(effective_scale, effective_scale)
         if rotation:
@@ -165,7 +179,6 @@ class PageRenderer:
         pix = page.get_pixmap(matrix=mat, alpha=False)
         theme_spec = THEMES.get(theme_name)
 
-        # 4. Apply reading theme (Original, Smart Dark, Keep Images, Sepia, Nord)
         if theme_spec is None:
             qimg = QImage(
                 pix.samples, pix.width, pix.height, pix.stride, QImage.Format_RGB888
@@ -197,11 +210,9 @@ class PageRenderer:
                 pix.samples, pix.width, pix.height, pix.stride, bg_rgb, fg_rgb
             )
 
-        # 5. Paint overlays (User Highlights, Search Matches, Active TTS Sentence)
         painter = QPainter(qimg)
         painter.setRenderHint(QPainter.Antialiasing, True)
 
-        # 5a. Saved User Highlights & Note Indicators
         if hl_list:
             for item in hl_list:
                 if isinstance(item, str):
@@ -254,7 +265,6 @@ class PageRenderer:
                     painter.setPen(QPen(QColor("#11111B"), 1.2 * dpr))
                     painter.drawEllipse(badge_rect)
 
-        # 5b. In-Book Search Query Matches (Orange Highlight)
         if search_query.strip():
             s_rects = page.search_for(search_query.strip())
             if s_rects:
@@ -266,11 +276,15 @@ class PageRenderer:
                         QRectF(sr.x0, sr.y0, sr.width, sr.height), 3.0 * dpr, 3.0 * dpr
                     )
 
-        # 5c. Active Neural TTS Sentence Highlight (Sky-Blue Overlay)
         if tts_text and str(tts_text).strip():
             doc_path = getattr(doc, "name", "") if doc else ""
+            tts_bbox = kwargs.get("active_tts_bbox")
             tts_rects = cls._find_text_rects(
-                page, str(tts_text), filepath=doc_path, page_idx=p_idx
+                page,
+                str(tts_text),
+                filepath=doc_path,
+                page_idx=p_idx,
+                clip_bbox=tts_bbox,
             )
             if tts_rects:
                 painter.setBrush(QColor(137, 180, 250, 85))
@@ -290,7 +304,6 @@ class PageRenderer:
 
         painter.end()
 
-        # 6. Return HiDPI QPixmap
         out_pixmap = QPixmap.fromImage(qimg)
         out_pixmap.setDevicePixelRatio(dpr)
         return out_pixmap

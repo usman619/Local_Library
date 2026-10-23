@@ -1175,7 +1175,15 @@ class ReaderView(QWidget):
         self.canvas.active_tts_page = page_idx
         self.canvas.active_tts_sentence = sentence_text
         self.canvas.active_tts_text = sentence_text
-        
+
+        # Find the exact bounding box of the current paragraph so highlight NEVER jumps to other columns
+        active_bbox = None
+        if self.tts_worker and 0 <= self.tts_worker.current_index < len(self.current_tts_units):
+            u = self.current_tts_units[self.tts_worker.current_index]
+            if u.page_idx == page_idx and u.bbox:
+                active_bbox = u.bbox
+        self.canvas.active_tts_bbox = active_bbox
+
         if self.current_book:
             self.current_book["tts_state"] = {
                 "page": page_idx,
@@ -1198,12 +1206,13 @@ class ReaderView(QWidget):
             elif self.canvas.view_mode == "continuous" and self.doc:
                 page = self.doc.load_page(page_idx)
                 from app.core.renderer import PageRenderer
-                rects = PageRenderer._find_text_rects(page, sentence_text)
+                rects = PageRenderer._find_text_rects(
+                    page, sentence_text, clip_bbox=active_bbox
+                )
                 if rects:
                     r = rects[0]
                     vp_rect = self.canvas._pdf_rect_to_viewport(page_idx, r)
                     vp_h = self.canvas.viewport().height()
-                    # If sentence is near the bottom 25% or above top 15% of viewport, scroll smoothly
                     if vp_rect.bottom() > vp_h * 0.78 or vp_rect.top() < vp_h * 0.12:
                         self.canvas.ensure_page_rect_visible(page_idx, r)
 
