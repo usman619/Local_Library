@@ -162,6 +162,7 @@ class ReaderView(QWidget):
 
         # Center Virtualized Document Canvas
         self.canvas = DocumentCanvasView()
+        self.canvas.user_scrolled_manually.connect(self._on_user_scrolled_manually)
         self.canvas.page_changed.connect(self._on_canvas_page_changed)
         self.canvas.highlight_added.connect(self._on_canvas_highlight_added)
         self.canvas.highlight_deleted.connect(self._delete_highlight_by_index)
@@ -271,6 +272,14 @@ class ReaderView(QWidget):
         btn_reset_tts.setToolTip("Reset Speed (1.0x) and Pitch (0st) to Default")
         btn_reset_tts.clicked.connect(self._reset_tts_sliders)
         controls_row.addWidget(btn_reset_tts)
+
+        self.btn_auto_scroll = QPushButton()
+        self.btn_auto_scroll.setCheckable(True)
+        init_follow = bool(self.store.settings.get("tts_auto_scroll", True))
+        self.btn_auto_scroll.setChecked(init_follow)
+        self._update_follow_button_ui(init_follow)
+        self.btn_auto_scroll.clicked.connect(self._on_follow_button_clicked)
+        controls_row.addWidget(self.btn_auto_scroll)
 
         self.btn_auto_scroll = QPushButton("Follow")
         self.btn_auto_scroll.setCheckable(True)
@@ -1176,7 +1185,6 @@ class ReaderView(QWidget):
         self.canvas.active_tts_sentence = sentence_text
         self.canvas.active_tts_text = sentence_text
 
-        # Find the exact bounding box of the current paragraph so highlight NEVER jumps to other columns
         active_bbox = None
         if self.tts_worker and 0 <= self.tts_worker.current_index < len(self.current_tts_units):
             u = self.current_tts_units[self.tts_worker.current_index]
@@ -1199,22 +1207,9 @@ class ReaderView(QWidget):
             self.canvas.invalidate_page(prev_page)
         self.canvas.invalidate_page(page_idx)
 
-        # Smoothly auto-scroll to keep the active spoken sentence visible
+        # Smoothly glide the page ONLY when Follow is Locked (🔒)
         if getattr(self, "btn_auto_scroll", None) and self.btn_auto_scroll.isChecked():
-            if page_idx != self.canvas.current_page:
-                self.jump_to_page(page_idx)
-            elif self.canvas.view_mode == "continuous" and self.doc:
-                page = self.doc.load_page(page_idx)
-                from app.core.renderer import PageRenderer
-                rects = PageRenderer._find_text_rects(
-                    page, sentence_text, clip_bbox=active_bbox
-                )
-                if rects:
-                    r = rects[0]
-                    vp_rect = self.canvas._pdf_rect_to_viewport(page_idx, r)
-                    vp_h = self.canvas.viewport().height()
-                    if vp_rect.bottom() > vp_h * 0.78 or vp_rect.top() < vp_h * 0.12:
-                        self.canvas.ensure_page_rect_visible(page_idx, r)
+            self._smooth_follow_active_sentence(force_center=False)
 
     def _on_tts_state_changed(self, state: str):
         if state == "playing":
@@ -1262,3 +1257,111 @@ class ReaderView(QWidget):
             self.canvas.invalidate_page(prev_page)
         self.btn_tts_play_pause.setText("▶")
         self.btn_tts_play_pause.setToolTip("Play / Resume TTS")
+    
+    # Auto Scrolling
+    def _update_follow_button_ui(self, locked: bool):
+        """Updates the visual state of the Lock/Unlock TTS Follow button."""
+        if not getattr(self, "btn_auto_scroll", None):
+            return
+        self.btn_auto_scroll.blockSignals(True)
+        self.btn_auto_scroll.setChecked(locked)
+        self.btn_auto_scroll.blockSignals(False)
+
+        if locked:
+            self.btn_auto_scroll.setText("🔒 Follow Locked")
+            self.btn_auto_scroll.setToolTip(
+                "TTS Auto-Follow is LOCKED (Page glides smoothly with speech).\n"
+                "Scrolling manually with your mouse wheel will automatically unlock it."
+            )
+            self.btn_auto_scroll.setStyleSheet("""
+                QPushButton {
+                    background-color: #313244;
+                    color: #89B4FA;
+                    border: 1px solid #89B4FA;
+                    border-radius: 7px;
+                    padding: 5px 11px;
+                    font-weight: bold;
+                }
+                QPushButton:hover {
+                    background-color: #45475A;
+                    color: #FFFFFF;
+                }
+            """)
+        else:
+            self.btn_auto_scroll.setText("🔓 Follow Unlocked")
+            self.btn_auto_scroll.setToolTip(
+                "TTS Auto-Follow is UNLOCKED (Free-scroll mode).\n"
+                "Click to re-lock and smoothly glide back to the active spoken sentence."
+            )
+            self.btn_auto_scroll.setStyleSheet("""
+                QPushButton {
+                    background-color: #1E1E2E;
+                    color: #F9E2AF;
+                    border: 1px solid #F9E2AF;
+                    border-radius: 7px;
+                    padding: 5px 11px;
+                    font-weight: 600;
+                }
+                QPushButton:hover {
+                    background-color: #313244;
+                    color: #FFFFFF;
+                }
+            """)
+
+    def _on_follow_button_clicked(self, checked: bool):
+        self._update_follow_button_ui(checked)
+        self.store.save_settings(tts_auto_scroll=checked)
+        # If the user just re-locked Follow while TTS is active, smoothly glide right back to the active sentence!
+        if checked and self.canvas.active_tts_page is not None and self.canvas.active_tts_sentence:
+            self._smooth_follow_active_sentence(force_center=True)
+
+    def _on_user_scrolled_manually(self):
+        """
+        Automatically unlocks TTS auto-follow the moment the user scrolls the document
+        while TTS is actively playing, so the screen never fights the user's scrolling.
+        """
+        if (
+            self.tts_worker
+            and self.tts_worker.isRunning()
+            and not self.tts_worker.is_paused
+            and getattr(self, "btn_auto_scroll", None)
+            and self.btn_auto_scroll.isChecked()
+        ):
+            self._update_follow_button_ui(False)
+            self.lbl_tts_status.setText(
+                "🔓 Free-Scroll Mode (Auto-follow paused while you browse — Click '🔓 Follow Unlocked' to snap back)"
+            )
+
+    def _smooth_follow_active_sentence(self, force_center: bool = False):
+        """Glides the viewport smoothly to keep the active TTS sentence in the reading sweet spot."""
+        if not self.doc or self.canvas.active_tts_page is None or not self.canvas.active_tts_sentence:
+            return
+
+        page_idx = self.canvas.active_tts_page
+        sentence_text = self.canvas.active_tts_sentence
+        active_bbox = getattr(self.canvas, "active_tts_bbox", None)
+
+        if self.canvas.view_mode != "continuous":
+            if page_idx != self.canvas.current_page:
+                self.jump_to_page(page_idx)
+            return
+
+        page = self.doc.load_page(page_idx)
+        from app.core.renderer import PageRenderer
+        filepath = self.current_book.get("path", "") if self.current_book else ""
+        rects = PageRenderer._find_text_rects(
+            page,
+            sentence_text,
+            filepath=filepath,
+            page_idx=page_idx,
+            clip_bbox=active_bbox,
+        )
+        if rects:
+            self.canvas.smooth_scroll_to_page_rect(
+                page_idx, rects[0], force_center=force_center
+            )
+        elif active_bbox and len(active_bbox) == 4:
+            import pymupdf
+            self.canvas.smooth_scroll_to_page_rect(
+                page_idx, pymupdf.Rect(active_bbox), force_center=force_center
+            )

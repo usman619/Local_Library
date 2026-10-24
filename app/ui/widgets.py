@@ -2,9 +2,9 @@ import os
 import bisect
 import webbrowser
 import pymupdf
-from PySide6.QtCore import Qt, QSize, Signal, QEvent, QPoint, QPointF, QRect, QRectF, QTimer
+from PySide6.QtCore import Qt, QSize, Signal, QEvent, QPoint, QPointF, QRect, QRectF, QTimer ,QVariantAnimation, QEasingCurve
 from PySide6.QtGui import (
-    QPixmap, QFont, QCursor, QNativeGestureEvent, QPainter, QColor, QPen
+    QPixmap, QFont, QCursor, QNativeGestureEvent, QPainter, QColor, QPen, QFontMetrics
 )
 from PySide6.QtWidgets import (
     QAbstractScrollArea, QLabel, QFrame, QVBoxLayout, QHBoxLayout,
@@ -102,7 +102,10 @@ class DocumentCanvasView(QAbstractScrollArea):
     mouse text selection, search match overlays, and pinch-to-zoom.
     """
 
-    page_changed = Signal(int, int, float)
+    page_changed = Signal(int)
+    selection_changed = Signal(object, str, QPoint)
+    zoom_changed = Signal(float)
+    user_scrolled_manually = Signal()
     highlight_added = Signal(int, str, str, list)
     highlight_deleted = Signal(int)
     highlight_color_changed = Signal(int, str)
@@ -184,6 +187,16 @@ class DocumentCanvasView(QAbstractScrollArea):
         self._prefetch_timer.setSingleShot(True)
         self._prefetch_timer.setInterval(85)
         self._prefetch_timer.timeout.connect(self._prefetch_nearby_pages)
+
+        self._programmatic_scroll = False
+        self._scroll_anim = QVariantAnimation(self)
+        self._scroll_anim.setDuration(320)
+        self._scroll_anim.setEasingCurve(QEasingCurve.OutCubic)
+        self._scroll_anim.valueChanged.connect(self._on_smooth_scroll_step)
+
+        # Detect if the user drags or clicks the scrollbar directly
+        self.verticalScrollBar().sliderMoved.connect(self._on_user_manual_scroll)
+        self.verticalScrollBar().actionTriggered.connect(self._on_scrollbar_action)
 
     def set_document(self, doc, highlights: list[dict]):
         self.doc = doc
@@ -1045,6 +1058,10 @@ class DocumentCanvasView(QAbstractScrollArea):
             event.accept()
             return
 
+        if self._scroll_anim.state() == QVariantAnimation.Running:
+            self._scroll_anim.stop()
+        self.user_scrolled_manually.emit()
+
         if self.view_mode != "continuous":
             vbar = self.verticalScrollBar()
             dy = event.angleDelta().y() or event.pixelDelta().y()
@@ -1062,6 +1079,84 @@ class DocumentCanvasView(QAbstractScrollArea):
                 return
 
         super().wheelEvent(event)
+
+    def _on_user_manual_scroll(self, *_args):
+        if not self._programmatic_scroll:
+            if self._scroll_anim.state() == QVariantAnimation.Running:
+                self._scroll_anim.stop()
+            self.user_scrolled_manually.emit()
+
+    def _on_scrollbar_action(self, _action: int):
+        if not self._programmatic_scroll:
+            if self._scroll_anim.state() == QVariantAnimation.Running:
+                self._scroll_anim.stop()
+            self.user_scrolled_manually.emit()
+
+    def _on_smooth_scroll_step(self, value):
+        self._programmatic_scroll = True
+        try:
+            self.verticalScrollBar().setValue(int(value))
+        finally:
+            self._programmatic_scroll = False
+
+    def smooth_scroll_to_y(self, target_y: int, duration_ms: int = 320):
+        """Smoothly animates the vertical scrollbar to target_y using a cubic ease-out curve."""
+        vbar = self.verticalScrollBar()
+        target_y = max(vbar.minimum(), min(vbar.maximum(), int(target_y)))
+        current_y = vbar.value()
+
+        if abs(target_y - current_y) <= 4:
+            return
+
+        if self._scroll_anim.state() == QVariantAnimation.Running:
+            self._scroll_anim.stop()
+
+        self._scroll_anim.setDuration(duration_ms)
+        self._scroll_anim.setStartValue(current_y)
+        self._scroll_anim.setEndValue(target_y)
+        self._scroll_anim.start()
+
+    def smooth_scroll_to_page_rect(
+        self, page_idx: int, pdf_rect: pymupdf.Rect, force_center: bool = False
+    ):
+        """
+        Smoothly glides the viewport so `pdf_rect` on `page_idx` sits comfortably
+        in the upper-third reading zone (32% from top of viewport).
+        """
+        if not self.doc or page_idx < 0 or page_idx >= len(self.doc):
+            return
+
+        if self.view_mode != "continuous":
+            if page_idx != self.current_page:
+                self._programmatic_scroll = True
+                try:
+                    self.scroll_to_page(page_idx)
+                finally:
+                    self._programmatic_scroll = False
+            return
+
+        vp_rect = self._pdf_rect_to_viewport(page_idx, pdf_rect)
+        vp_h = max(1, self.viewport().height())
+
+        # Keep sentence in the comfortable reading sweet spot (between 15% and 70% of viewport height)
+        needs_scroll = (
+            force_center
+            or vp_rect.bottom() > vp_h * 0.70
+            or vp_rect.top() < vp_h * 0.14
+        )
+        if not needs_scroll:
+            return
+
+        # Calculate exact scrollbar value that places the sentence 32% down from the top of the viewport
+        current_scroll = self.verticalScrollBar().value()
+        desired_viewport_y = int(vp_h * 0.32)
+        delta_y = int(vp_rect.top()) - desired_viewport_y
+        target_scroll = current_scroll + delta_y
+
+        # Scale duration slightly with distance so both small line steps and page jumps feel natural
+        distance = abs(delta_y)
+        duration = min(480, max(240, int(distance * 0.65)))
+        self.smooth_scroll_to_y(target_scroll, duration_ms=duration)
 
     def _request_lookup_from_selection(self):
         if self._sel_text.strip():
@@ -1087,123 +1182,205 @@ class DocumentCanvasView(QAbstractScrollArea):
 
 
 class BookCardWidget(QFrame):
-    """Clickable book card with outer-only hover border, truncated title, and remove action."""
+    """Clickable library card showing cover thumbnail, format, folder badge, progress bar, and remove button."""
 
     clicked = Signal(str)
     remove_requested = Signal(str)
+    folder_menu_requested = Signal(str, QPoint)
 
     def __init__(self, book: dict):
         super().__init__()
-        self.book_path = book["path"]
-        self.full_title = book.get("title", "Untitled")
-
+        self.book_path = book.get("path", "")
+        self.category = book.get("category", "").strip()
         self.setObjectName("BookCard")
-        self.setFixedSize(215, 348)
-        self.setCursor(QCursor(Qt.PointingHandCursor))
-
+        self.setCursor(Qt.PointingHandCursor)
+        self.setFixedSize(215, 340)
         self.setStyleSheet("""
             QFrame#BookCard {
-                background-color: #1E1E2E;
-                border: 2px solid #313244;
+                background-color: #181825;
+                border: 1px solid #313244;
                 border-radius: 10px;
             }
             QFrame#BookCard:hover {
-                border: 2px solid #89B4FA;
                 background-color: #1E1E2E;
+                border: 1px solid #89B4FA;
             }
-            QLabel {
-                border: none;
+            QFrame#BookCard QLabel {
                 background: transparent;
-                color: #CDD6F4;
+                border: none;
             }
         """)
 
         layout = QVBoxLayout(self)
         layout.setContentsMargins(12, 10, 12, 12)
-        layout.setSpacing(5)
+        layout.setSpacing(6)
 
+        # Top row: Format badge + Folder badge + Remove button
         top_row = QHBoxLayout()
         top_row.setContentsMargins(0, 0, 0, 0)
+        top_row.setSpacing(4)
+
         fmt_badge = QLabel(book.get("format", "BOOK"))
         fmt_badge.setStyleSheet(
-            "color: #89B4FA; font-size: 10px; font-weight: bold; background: transparent; border: none;"
+            "color: #89B4FA; font-size: 10px; font-weight: bold; letter-spacing: 0.5px;"
         )
         top_row.addWidget(fmt_badge)
+
         top_row.addStretch(1)
 
-        btn_remove = QPushButton("✕")
-        btn_remove.setFixedSize(22, 22)
-        btn_remove.setToolTip(f"Remove '{self.full_title}' from library")
-        btn_remove.setStyleSheet("""
+        folder_label = self.category if self.category else "+ Folder"
+        if len(folder_label) > 12:
+            folder_label = folder_label[:11] + "…"
+        self.btn_folder = QPushButton(f"📁 {folder_label}")
+        self.btn_folder.setCursor(Qt.PointingHandCursor)
+        self.btn_folder.setFocusPolicy(Qt.NoFocus)
+        self.btn_folder.setToolTip(
+            f"Current Folder: {self.category or 'Uncategorized'}\nClick to move book to another folder on disk"
+        )
+        self.btn_folder.setStyleSheet("""
+            QPushButton {
+                background-color: #252538;
+                color: #F9E2AF;
+                border: 1px solid #45475A;
+                border-radius: 5px;
+                font-size: 10px;
+                font-weight: 600;
+                padding: 2px 6px;
+            }
+            QPushButton:hover {
+                background-color: #313244;
+                border-color: #F9E2AF;
+                color: #FFFFFF;
+            }
+        """)
+        self.btn_folder.clicked.connect(self._on_folder_btn_clicked)
+        top_row.addWidget(self.btn_folder)
+
+        self.btn_remove = QPushButton("×")
+        self.btn_remove.setFixedSize(20, 20)
+        self.btn_remove.setFocusPolicy(Qt.NoFocus)
+        self.btn_remove.setToolTip("Remove from Library")
+        self.btn_remove.setStyleSheet("""
             QPushButton {
                 background-color: transparent;
                 color: #6C7086;
                 border: none;
-                border-radius: 11px;
-                font-size: 12px;
+                font-size: 15px;
                 font-weight: bold;
                 padding: 0px;
             }
             QPushButton:hover {
-                background-color: #F38BA8;
-                color: #11111B;
+                color: #F38BA8;
+                background-color: #313244;
+                border-radius: 4px;
             }
         """)
-        btn_remove.clicked.connect(lambda: self.remove_requested.emit(self.book_path))
-        top_row.addWidget(btn_remove)
+        self.btn_remove.clicked.connect(lambda: self.remove_requested.emit(self.book_path))
+        top_row.addWidget(self.btn_remove)
         layout.addLayout(top_row)
 
+        # Cover thumbnail — supports "cover_path", "cover_image", or "cover" keys
         cover_lbl = QLabel()
-        cover_lbl.setFixedSize(187, 205)
+        cover_lbl.setFixedSize(191, 210)
         cover_lbl.setAlignment(Qt.AlignCenter)
-        cover_lbl.setAttribute(Qt.WA_TransparentForMouseEvents, True)
-        if os.path.exists(book.get("cover", "")):
-            pix = QPixmap(book["cover"]).scaled(
-                187, 205, Qt.KeepAspectRatio, Qt.SmoothTransformation
-            )
-            cover_lbl.setPixmap(pix)
+        cover_lbl.setStyleSheet("background-color: #11111B; border-radius: 6px;")
+
+        cover_path = (
+            book.get("cover_path")
+            or book.get("cover_image")
+            or book.get("cover")
+            or ""
+        )
+        if cover_path and os.path.exists(cover_path):
+            pix = QPixmap(cover_path)
+            if not pix.isNull():
+                scaled_pix = pix.scaled(
+                    187, 206, Qt.KeepAspectRatio, Qt.SmoothTransformation
+                )
+                cover_lbl.setPixmap(scaled_pix)
+            else:
+                cover_lbl.setText(book.get("format", "BOOK"))
+                cover_lbl.setStyleSheet(
+                    "background-color: #11111B; color: #585B70; font-size: 20px; "
+                    "font-weight: bold; border-radius: 6px;"
+                )
         else:
             cover_lbl.setText(book.get("format", "BOOK"))
-        layout.addWidget(cover_lbl)
+            cover_lbl.setStyleSheet(
+                "background-color: #11111B; color: #585B70; font-size: 20px; "
+                "font-weight: bold; border-radius: 6px;"
+            )
+        layout.addWidget(cover_lbl, alignment=Qt.AlignCenter)
 
-        display_title = self._truncate_title(self.full_title, max_words=6, max_chars=40)
-        title_lbl = QLabel(display_title)
-        title_lbl.setFont(QFont("Sans Serif", 10, QFont.Bold))
+        # Title
+        title_lbl = QLabel(book.get("title", "Untitled"))
         title_lbl.setWordWrap(True)
-        title_lbl.setFixedHeight(36)
-        title_lbl.setAlignment(Qt.AlignLeft | Qt.AlignTop)
-        title_lbl.setToolTip(self.full_title)
+        title_lbl.setFixedHeight(34)
+        title_lbl.setStyleSheet("color: #CDD6F4; font-weight: bold; font-size: 12px;")
+        metrics = QFontMetrics(title_lbl.font())
+        elided_title = metrics.elidedText(
+            book.get("title", "Untitled"), Qt.ElideRight, 340
+        )
+        title_lbl.setText(elided_title)
         layout.addWidget(title_lbl)
 
-        raw_author = book.get("author", "Unknown Author")
-        display_author = raw_author if len(raw_author) <= 28 else raw_author[:25] + "..."
-        author_lbl = QLabel(display_author)
-        author_lbl.setStyleSheet("color: #A6ADC8; font-size: 11px; border: none; background: transparent;")
-        author_lbl.setFixedHeight(16)
-        author_lbl.setAttribute(Qt.WA_TransparentForMouseEvents, True)
+        # Author
+        author_lbl = QLabel(book.get("author", "Unknown Author"))
+        author_lbl.setStyleSheet("color: #A6ADC8; font-size: 11px;")
+        author_metrics = QFontMetrics(author_lbl.font())
+        author_lbl.setText(
+            author_metrics.elidedText(
+                book.get("author", "Unknown Author"), Qt.ElideRight, 185
+            )
+        )
         layout.addWidget(author_lbl)
 
+        # Progress bar & page status
         cur = book.get("current_page", 0) + 1
         tot = max(1, book.get("total_pages", 1))
         pct = int((cur / tot) * 100) if cur > 1 else 0
 
-        prog = QProgressBar()
-        prog.setRange(0, 100)
-        prog.setValue(pct)
-        prog.setFixedHeight(6)
-        prog.setTextVisible(False)
-        prog.setAttribute(Qt.WA_TransparentForMouseEvents, True)
-        prog.setStyleSheet("""
-            QProgressBar { background-color: #313244; border-radius: 3px; border: none; }
-            QProgressBar::chunk { background-color: #A6E3A1; border-radius: 3px; }
+        pbar = QProgressBar()
+        pbar.setRange(0, 100)
+        pbar.setValue(pct)
+        pbar.setTextVisible(False)
+        pbar.setFixedHeight(5)
+        pbar.setStyleSheet("""
+            QProgressBar {
+                background-color: #313244;
+                border-radius: 2px;
+                border: none;
+            }
+            QProgressBar::chunk {
+                background-color: #A6E3A1;
+                border-radius: 2px;
+            }
         """)
-        layout.addWidget(prog)
+        layout.addWidget(pbar)
 
-        pct_lbl = QLabel(f"{pct}%  (Page {cur} of {tot})")
-        pct_lbl.setStyleSheet("color: #9399B2; font-size: 11px; border: none; background: transparent;")
-        pct_lbl.setFixedHeight(16)
-        pct_lbl.setAttribute(Qt.WA_TransparentForMouseEvents, True)
-        layout.addWidget(pct_lbl)
+        prog_lbl = QLabel(f"{pct}% (Page {cur} of {tot})")
+        prog_lbl.setStyleSheet("color: #6C7086; font-size: 10px;")
+        layout.addWidget(prog_lbl)
+
+    def _on_folder_btn_clicked(self):
+        global_pos = self.btn_folder.mapToGlobal(
+            QPoint(0, self.btn_folder.height() + 4)
+        )
+        self.folder_menu_requested.emit(self.book_path, global_pos)
+
+    def contextMenuEvent(self, event):
+        self.folder_menu_requested.emit(self.book_path, event.globalPos())
+        event.accept()
+
+    def mousePressEvent(self, event):
+        if event.button() == Qt.LeftButton:
+            # Do not open the book if the user clicked the "+ Folder" or "×" button
+            child = self.childAt(event.position().toPoint())
+            if child in (self.btn_folder, self.btn_remove):
+                super().mousePressEvent(event)
+                return
+            self.clicked.emit(self.book_path)
+        super().mousePressEvent(event)
 
     @staticmethod
     def _truncate_title(title: str, max_words: int = 6, max_chars: int = 40) -> str:

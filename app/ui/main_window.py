@@ -139,7 +139,11 @@ class LocalLibraryWindow(QMainWindow):
         self.library_view.book_remove_requested.connect(self.remove_book_from_library)
         self.library_view.add_books_requested.connect(self.import_multiple_files_dialog)
         self.library_view.import_folders_requested.connect(self.import_multiple_folders_dialog)
-        self.reader_view.progress_updated.connect(self.lbl_page_status.setText)
+        self.library_view.create_folder_requested.connect(self._on_create_folder)
+        self.library_view.rename_folder_requested.connect(self._on_rename_folder)
+        self.library_view.delete_folder_requested.connect(self._on_delete_folder)
+        self.library_view.move_book_requested.connect(self._on_move_book_to_folder)
+        self.library_view.change_root_dir_requested.connect(self._on_change_library_root)
 
         self.show_library_view()
 
@@ -257,8 +261,44 @@ class LocalLibraryWindow(QMainWindow):
         self._set_reader_controls_visible(False)
         self._set_library_controls_visible(True)
         self.setWindowTitle("Linux eBook & PDF Reader")
-        self.library_view.populate(self.store.books, self.width())
+        self.store.refresh_epub_covers_once()
+        self._refresh_library_grid()
         self.stack.setCurrentIndex(0)
+
+    def _refresh_library_grid(self):
+        self.library_view.populate(
+            self.store.books,
+            self.width(),
+            folders=self.store.get_folders(),
+        )
+    
+    def _on_create_folder(self, folder_name: str):
+        ok, msg = self.store.create_folder(folder_name)
+        if not ok:
+            QMessageBox.warning(self, "Folder Error", msg)
+        self._refresh_library_grid()
+
+    def _on_rename_folder(self, old_name: str, new_name: str):
+        ok, msg = self.store.rename_folder(old_name, new_name)
+        if not ok:
+            QMessageBox.warning(self, "Rename Folder Error", msg)
+        self._refresh_library_grid()
+
+    def _on_delete_folder(self, folder_name: str):
+        ok, msg = self.store.delete_folder(folder_name)
+        if not ok:
+            QMessageBox.warning(self, "Delete Folder Error", msg)
+        self._refresh_library_grid()
+
+    def _on_move_book_to_folder(self, book_path: str, folder_name: str):
+        ok, msg = self.store.move_book_to_folder(book_path, folder_name)
+        if not ok:
+            QMessageBox.warning(self, "Move Book Error", msg)
+        self._refresh_library_grid()
+
+    def _on_change_library_root(self, new_root: str):
+        self.store.set_library_root(new_root)
+        self._refresh_library_grid()
 
     def import_multiple_files_dialog(self):
         paths, _ = QFileDialog.getOpenFileNames(
@@ -329,7 +369,7 @@ class LocalLibraryWindow(QMainWindow):
 
     def remove_book_from_library(self, filepath: str):
         self.store.remove_book(filepath)
-        self.library_view.populate(self.store.books, self.width())
+        self._refresh_library_grid()
 
     def open_book(self, filepath: str):
         if not os.path.exists(filepath):

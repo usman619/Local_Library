@@ -3,6 +3,7 @@ import re
 import json
 import hashlib
 import zipfile
+import shutil
 from pathlib import Path
 from datetime import datetime
 import pymupdf
@@ -50,6 +51,8 @@ class LibraryStore:
             "tts_auto_scroll": True,
             "theme_name": "Smart Dark (Mocha)",
             "view_mode": "Continuous Scroll",
+            "folders": [],
+            "library_root": "",
         }
         if self.settings_file.exists():
             try:
@@ -204,6 +207,7 @@ class LibraryStore:
             "reading_seconds": existing.get("reading_seconds", 0),
             "bookmarks": existing.get("bookmarks", []),
             "highlights": existing.get("highlights", []),
+            "category": existing.get("category", ""),
             "tts_state": existing.get(
             "tts_state",
             {
@@ -274,3 +278,192 @@ class LibraryStore:
                 except OSError:
                     pass
             self.save()
+    
+# ---- PHYSICAL FOLDER / CATEGORY MANAGEMENT ----
+
+    @staticmethod
+    def _sanitize_folder_name(name: str) -> str:
+        """Strips illegal filesystem characters from user-created folder names."""
+        cleaned = re.sub(r'[<>:"/\\|?*\x00-\x1f]', "", name).strip().strip(".")
+        return cleaned
+
+    def get_library_root(self) -> Path:
+        """
+        Returns the base directory on disk where category subfolders are created.
+        If not explicitly set by the user, infers the common parent folder of existing books
+        or falls back to ~/Documents/LocalLibrary.
+        """
+        saved_root = self.settings.get("library_root", "").strip()
+        if saved_root and os.path.isdir(saved_root):
+            return Path(saved_root).resolve()
+
+        # Infer from existing books in the library
+        parent_counts: dict[str, int] = {}
+        for b_path, b_info in self.books.items():
+            p = Path(b_path).resolve().parent
+            # If the book is already inside a known category subfolder, step up one level
+            cat = b_info.get("category", "").strip()
+            if cat and p.name == cat:
+                p = p.parent
+            if p.exists():
+                parent_counts[str(p)] = parent_counts.get(str(p), 0) + 1
+
+        if parent_counts:
+            best_root = max(parent_counts.items(), key=lambda x: x[1])[0]
+            self.save_settings(library_root=best_root)
+            return Path(best_root)
+
+        default_root = Path.home() / "Documents" / "LocalLibrary"
+        default_root.mkdir(parents=True, exist_ok=True)
+        self.save_settings(library_root=str(default_root))
+        return default_root
+
+    def set_library_root(self, new_root_dir: str) -> Path:
+        """Updates the base directory where category folders live and moves existing category folders."""
+        new_root = Path(new_root_dir).resolve()
+        new_root.mkdir(parents=True, exist_ok=True)
+        self.save_settings(library_root=str(new_root))
+        return new_root
+
+    def get_folders(self) -> list[str]:
+        """Returns sorted list of user-created virtual category/folder names."""
+        folders = set(self.settings.get("folders", []))
+        for b in self.books.values():
+            if isinstance(b, dict):
+                cat = b.get("category", "").strip()
+                if cat:
+                    folders.add(cat)
+        sorted_folders = sorted(folders, key=lambda s: s.lower())
+        if sorted_folders != self.settings.get("folders"):
+            self.save_settings(folders=sorted_folders)
+        return sorted_folders
+    
+    def get_folder_books_map(self) -> dict[str, list[str]]:
+        """Returns a dictionary mapping each virtual category name to its list of book file paths."""
+        mapping: dict[str, list[str]] = {f: [] for f in self.get_folders()}
+        for k, b in self.books.items():
+            if not isinstance(b, dict):
+                continue
+            cat = b.get("category", "").strip()
+            path = b.get("path") or b.get("filepath") or str(k)
+            if cat:
+                mapping.setdefault(cat, []).append(path)
+        return mapping
+
+    def create_folder(self, folder_name: str) -> tuple[bool, str]:
+        """Creates a new virtual category/folder in settings.json."""
+        clean_name = " ".join(folder_name.split()).strip()
+        if not clean_name:
+            return False, "Category name cannot be empty."
+
+        existing = self.get_folders()
+        if any(f.lower() == clean_name.lower() for f in existing):
+            return False, f"Category '{clean_name}' already exists."
+
+        existing.append(clean_name)
+        existing.sort(key=lambda s: s.lower())
+        self.save_settings(folders=existing)
+        return True, clean_name
+
+    def _safe_move_file(self, src: Path, dst_dir: Path) -> Path:
+        """Moves src into dst_dir on the filesystem, avoiding filename collisions."""
+        dst_dir.mkdir(parents=True, exist_ok=True)
+        candidate = dst_dir / src.name
+        if candidate.resolve() == src.resolve():
+            return src.resolve()
+
+        stem = src.stem
+        suffix = src.suffix
+        counter = 1
+        while candidate.exists():
+            candidate = dst_dir / f"{stem}_{counter}{suffix}"
+            counter += 1
+
+        shutil.move(str(src), str(candidate))
+        return candidate.resolve()
+
+    def _resolve_book_key_and_entry(self, identifier: str) -> tuple[str | None, dict | None]:
+        """Finds (dict_key, book_dict) in self.books regardless of how identifier is formatted."""
+        if not identifier:
+            return None, None
+
+        if identifier in self.books:
+            return identifier, self.books[identifier]
+
+        norm_id = os.path.abspath(identifier)
+        if norm_id in self.books:
+            return norm_id, self.books[norm_id]
+
+        target_name = os.path.basename(identifier)
+        for k, b_info in self.books.items():
+            if not isinstance(b_info, dict):
+                continue
+            b_path = b_info.get("path") or b_info.get("filepath") or str(k)
+            if (
+                b_path == identifier
+                or os.path.abspath(b_path) == norm_id
+                or (target_name and os.path.basename(b_path) == target_name)
+            ):
+                return k, b_info
+
+        return None, None
+
+    def move_book_to_folder(self, book_path: str, folder_name: str) -> tuple[bool, str]:
+        """
+        Assigns a book to a virtual category/folder in library.json
+        WITHOUT moving or touching the file on the filesystem.
+        """
+        key, book_entry = self._resolve_book_key_and_entry(book_path)
+        if not book_entry or key is None:
+            return False, "Book not found in library database."
+
+        clean_folder = " ".join(folder_name.split()).strip() if folder_name else ""
+
+        if clean_folder:
+            folders = self.get_folders()
+            if clean_folder not in folders:
+                folders.append(clean_folder)
+                folders.sort(key=lambda s: s.lower())
+                self.save_settings(folders=folders)
+
+        book_entry["category"] = clean_folder
+        self.save()
+        return True, clean_folder
+
+    def rename_folder(self, old_name: str, new_name: str) -> tuple[bool, str]:
+        """Renames a virtual category across settings.json and all associated books in library.json."""
+        clean_new = " ".join(new_name.split()).strip()
+        if not clean_new:
+            return False, "New category name cannot be empty."
+        if old_name == clean_new:
+            return True, clean_new
+
+        folders = self.get_folders()
+        if any(f.lower() == clean_new.lower() and f != old_name for f in folders):
+            return False, f"A category named '{clean_new}' already exists."
+
+        for b_info in self.books.values():
+            if isinstance(b_info, dict) and b_info.get("category", "") == old_name:
+                b_info["category"] = clean_new
+
+        updated_folders = [clean_new if f == old_name else f for f in folders]
+        updated_folders = sorted(set(updated_folders), key=lambda s: s.lower())
+        self.save_settings(folders=updated_folders)
+        self.save()
+        return True, clean_new
+
+    def delete_folder(self, folder_name: str) -> tuple[bool, str]:
+        """
+        Deletes a virtual category and resets its books back to Uncategorized ("")
+        without touching any files on disk.
+        """
+        count = 0
+        for b_info in self.books.values():
+            if isinstance(b_info, dict) and b_info.get("category", "") == folder_name:
+                b_info["category"] = ""
+                count += 1
+
+        updated_folders = [f for f in self.get_folders() if f != folder_name]
+        self.save_settings(folders=updated_folders)
+        self.save()
+        return True, f"Deleted category '{folder_name}' ({count} book(s) returned to Uncategorized)."
