@@ -102,7 +102,7 @@ class DocumentCanvasView(QAbstractScrollArea):
     mouse text selection, search match overlays, and pinch-to-zoom.
     """
 
-    page_changed = Signal(int)
+    page_changed = Signal(int, int, float)
     selection_changed = Signal(object, str, QPoint)
     zoom_changed = Signal(float)
     user_scrolled_manually = Signal()
@@ -223,6 +223,23 @@ class DocumentCanvasView(QAbstractScrollArea):
 
         self._recalculate_layout()
         self.viewport().update()
+    
+    def set_zoom(self, new_zoom: float):
+        """Sets the zoom level and re-renders the viewport."""
+        self.zoom = max(0.5, min(3.5, float(new_zoom)))
+        self.zoom_changed.emit(self.zoom)
+        if hasattr(self, "_cache") and isinstance(self._cache, dict):
+            self._cache.clear()
+        if hasattr(self, "_pixmap_cache") and isinstance(self._pixmap_cache, dict):
+            self._pixmap_cache.clear()
+        self.viewport().update()
+    
+    def scroll_to_page(self, page_idx: int):
+        """Scrolls the canvas view to the specified page index."""
+        if not self.doc or page_idx < 0 or page_idx >= len(self.doc):
+            return
+        self.current_page = page_idx
+        self.jump_to_page(page_idx)
 
     def set_view_mode(self, mode: str):
         if mode not in ("continuous", "single", "spread"):

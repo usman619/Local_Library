@@ -143,6 +143,7 @@ class LocalLibraryWindow(QMainWindow):
         self.library_view.rename_folder_requested.connect(self._on_rename_folder)
         self.library_view.delete_folder_requested.connect(self._on_delete_folder)
         self.library_view.move_book_requested.connect(self._on_move_book_to_folder)
+        self.reader_view.status_updated.connect(self.lbl_page_status.setText)
         self.library_view.change_root_dir_requested.connect(self._on_change_library_root)
 
         self.show_library_view()
@@ -254,6 +255,7 @@ class LocalLibraryWindow(QMainWindow):
     def _set_reader_controls_visible(self, visible: bool):
         for act in self.reader_only_actions:
             act.setVisible(visible)
+            self.lbl_page_status.setVisible(visible)
 
     def show_library_view(self):
         self.reader_view.close_book()
@@ -378,6 +380,9 @@ class LocalLibraryWindow(QMainWindow):
         self._set_library_controls_visible(False)
         self._set_reader_controls_visible(True)
         self.reader_view.load_book(filepath)
+        self.reader_view._emit_status()
+        self.stack.setCurrentIndex(1)
+        
         book_title = (
             self.reader_view.current_book.get("title", "Book")
             if self.reader_view.current_book

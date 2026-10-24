@@ -1,6 +1,6 @@
 from pathlib import Path
 import pymupdf
-from PySide6.QtCore import Qt, QTimer, Signal, QPointF, QEvent
+from PySide6.QtCore import Qt, Signal, QTimer, QPoint, QPointF, QUrl, QRectF, QEvent
 from PySide6.QtGui import QColor, QIcon, QKeySequence, QPainter, QPainterPath, QPixmap, QShortcut
 from PySide6.QtWidgets import (
     QWidget, QVBoxLayout, QHBoxLayout, QSplitter, QTabWidget,
@@ -30,7 +30,8 @@ class ReaderView(QWidget):
     """Document reader with Evince-style Search Bar (Ctrl+F), Drag-to-Highlight, Spread Modes, and Neural TTS."""
 
     progress_updated = Signal(str)
-
+    status_updated = Signal(str)  # <-- Add this signal definition here
+    
     def __init__(self, store):
         super().__init__()
         self.store = store
@@ -162,16 +163,19 @@ class ReaderView(QWidget):
 
         # Center Virtualized Document Canvas
         self.canvas = DocumentCanvasView()
-        self.canvas.user_scrolled_manually.connect(self._on_user_scrolled_manually)
         self.canvas.page_changed.connect(self._on_canvas_page_changed)
+        self.canvas.selection_changed.connect(self._on_canvas_selection_changed)
+        self.canvas.zoom_changed.connect(self._on_canvas_zoom_changed)
+        self.canvas.user_scrolled_manually.connect(self._on_user_scrolled_manually)
+
         self.canvas.highlight_added.connect(self._on_canvas_highlight_added)
         self.canvas.highlight_deleted.connect(self._delete_highlight_by_index)
         self.canvas.highlight_color_changed.connect(self._change_highlight_color_by_index)
+
         self.canvas.tts_requested_at_page.connect(self._start_tts_from_selection)
         self.canvas.lookup_requested.connect(self.open_lookup_dialog)
         self.canvas.note_requested_for_selection.connect(self._on_canvas_note_for_selection)
         self.canvas.edit_highlight_note_requested.connect(self._edit_highlight_note_by_index)
-        self.canvas.tts_requested_at_page.connect(self._start_tts_from_selection)
 
         self.splitter.addWidget(self.canvas)
         self.splitter.setStretchFactor(1, 1)
@@ -273,21 +277,13 @@ class ReaderView(QWidget):
         btn_reset_tts.clicked.connect(self._reset_tts_sliders)
         controls_row.addWidget(btn_reset_tts)
 
+        # Single toggleable Lock/Unlock Follow button:
         self.btn_auto_scroll = QPushButton()
         self.btn_auto_scroll.setCheckable(True)
         init_follow = bool(self.store.settings.get("tts_auto_scroll", True))
         self.btn_auto_scroll.setChecked(init_follow)
         self._update_follow_button_ui(init_follow)
         self.btn_auto_scroll.clicked.connect(self._on_follow_button_clicked)
-        controls_row.addWidget(self.btn_auto_scroll)
-
-        self.btn_auto_scroll = QPushButton("Follow")
-        self.btn_auto_scroll.setCheckable(True)
-        self.btn_auto_scroll.setChecked(bool(self.store.settings.get("tts_auto_scroll", True)))
-        self.btn_auto_scroll.setToolTip("Automatically scroll the page to follow the spoken sentence")
-        self.btn_auto_scroll.toggled.connect(
-            lambda checked: self.store.save_settings(tts_auto_scroll=checked)
-        )
         controls_row.addWidget(self.btn_auto_scroll)
 
         controls_row.addStretch(1)
@@ -345,6 +341,42 @@ class ReaderView(QWidget):
                 self.close_search_bar()
                 return True
         return super().eventFilter(obj, event)
+    
+    def _on_canvas_selection_changed(
+        self, page_idx: int | None, selected_text: str, global_pos: QPoint
+    ):
+        """Handles text selection events on the document canvas."""
+        if page_idx is not None and selected_text and selected_text.strip():
+            cleaned = " ".join(selected_text.split()).strip()
+            if cleaned and hasattr(self, "selection_popup") and self.selection_popup:
+                self.selection_popup.show_selection_bar(page_idx, cleaned, global_pos)
+        else:
+            if hasattr(self, "selection_popup") and self.selection_popup:
+                self.selection_popup.hide()
+    
+    def _sync_toc_selection(self, page_idx: int):
+        """Synchronizes the Table of Contents tree selection with the active page index."""
+        if not hasattr(self, "toc_tree") or not self.toc_tree:
+            return
+        # Find the TOC item closest to page_idx without exceeding it
+        best_item = None
+        root = self.toc_tree.invisibleRootItem()
+        
+        def _search(parent_item):
+            nonlocal best_item
+            for i in range(parent_item.childCount()):
+                child = parent_item.child(i)
+                data = child.data(0, Qt.UserRole)
+                if isinstance(data, int) and data <= page_idx:
+                    best_item = child
+                _search(child)
+
+        _search(root)
+        if best_item:
+            self.toc_tree.blockSignals(True)
+            self.toc_tree.setCurrentItem(best_item)
+            self.toc_tree.scrollToItem(best_item)
+            self.toc_tree.blockSignals(False)
 
     # -----------------------------------------------------------------
     # IN-BOOK SEARCH (Ctrl+F, Next/Prev Match & Sidebar Snippets)
@@ -498,6 +530,13 @@ class ReaderView(QWidget):
         saved_page = min(self.current_book.get("current_page", 0), len(self.doc) - 1)
         QTimer.singleShot(40, lambda: self.jump_to_page(saved_page))
 
+        saved_zoom = float(self.current_book.get("zoom", 1.25))
+        self.canvas.set_zoom(saved_zoom)
+        saved_page = int(self.current_book.get("current_page", 0))
+        self.canvas.scroll_to_page(saved_page)
+        self._sync_toc_selection(saved_page)
+        self._emit_status()
+
     def close_book(self):
         """Closes the active document, stops TTS, and clears reader state when returning Home."""
         self.stop_tts()
@@ -549,26 +588,40 @@ class ReaderView(QWidget):
     def step_next_page(self):
         self.canvas.step_Next()
 
-    def _on_canvas_page_changed(self, current_page: int, total_pages: int, zoom: float):
+    def _emit_status(self):
+        """Emits the current page, reading percentage, and zoom percentage to the top toolbar."""
+        if not self.doc:
+            self.status_updated.emit("")
+            return
+        total = max(1, len(self.doc))
+        cur = min(total, max(1, self.canvas.current_page + 1))
+        pct = int((cur / total) * 100)
+        zoom_pct = int(round(self.canvas.zoom * 100))
+        self.status_updated.emit(f"Page {cur} / {total} ({pct}%)  •  Zoom {zoom_pct}%")
+
+    def _on_canvas_page_changed(self, page_idx: int):
+        if not self.doc or not self.current_book:
+            return
+        self.current_book["current_page"] = page_idx
+        self.store.save()
+        self._sync_toc_selection(page_idx)
+        self._emit_status()
+
+    def _on_canvas_zoom_changed(self, new_zoom: float):
         if self.current_book:
-            self.current_book["current_page"] = current_page
-            self.current_book["total_pages"] = total_pages
+            self.current_book["zoom"] = round(float(new_zoom), 2)
             self.store.save()
+        self._emit_status()
+    
+    def zoom_in(self):
+        if self.doc:
+            self.canvas.set_zoom(min(3.5, round(self.canvas.zoom + 0.15, 2)))
+            self._emit_status()
 
-            pages = self.canvas.get_active_paginated_pages()
-            last_visible_page = pages[-1] if pages else current_page
-            pct = int(((last_visible_page + 1) / max(1, total_pages)) * 100)
-
-            if self.canvas.view_mode == "spread" and len(pages) == 2:
-                page_str = f"Pages {pages[0] + 1}–{pages[1] + 1} / {total_pages}"
-            else:
-                page_str = f"Page {current_page + 1} / {total_pages}"
-
-            self.progress_updated.emit(
-                f"  {page_str} ({pct}%)  •  Zoom {int(zoom * 100)}%  "
-            )
-            # Visually sync the Contents (TOC) sidebar to the current scrolled page
-            self._sync_toc_to_page(last_visible_page)
+    def zoom_out(self):
+        if self.doc:
+            self.canvas.set_zoom(max(0.5, round(self.canvas.zoom - 0.15, 2)))
+            self._emit_status()
 
     def jump_to_page(self, page_index: int):
         self.canvas.jump_to_page(page_index)
@@ -1268,7 +1321,7 @@ class ReaderView(QWidget):
         self.btn_auto_scroll.blockSignals(False)
 
         if locked:
-            self.btn_auto_scroll.setText("🔒 Follow Locked")
+            self.btn_auto_scroll.setText("Follow Locked")
             self.btn_auto_scroll.setToolTip(
                 "TTS Auto-Follow is LOCKED (Page glides smoothly with speech).\n"
                 "Scrolling manually with your mouse wheel will automatically unlock it."
@@ -1288,7 +1341,7 @@ class ReaderView(QWidget):
                 }
             """)
         else:
-            self.btn_auto_scroll.setText("🔓 Follow Unlocked")
+            self.btn_auto_scroll.setText("Follow Unlocked")
             self.btn_auto_scroll.setToolTip(
                 "TTS Auto-Follow is UNLOCKED (Free-scroll mode).\n"
                 "Click to re-lock and smoothly glide back to the active spoken sentence."
@@ -1329,7 +1382,7 @@ class ReaderView(QWidget):
         ):
             self._update_follow_button_ui(False)
             self.lbl_tts_status.setText(
-                "🔓 Free-Scroll Mode (Auto-follow paused while you browse — Click '🔓 Follow Unlocked' to snap back)"
+                "Free-Scroll Mode (Auto-follow paused while you browse — Click 'Follow Unlocked' to snap back)"
             )
 
     def _smooth_follow_active_sentence(self, force_center: bool = False):
