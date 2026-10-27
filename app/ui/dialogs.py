@@ -35,6 +35,8 @@ class LookupPopupDialog(QDialog):
 
         self.setWindowTitle(f"Lookup — “{self.selected_text[:36]}”")
         self.resize(540, 430)
+        self.setMinimumSize(460, 360)
+        self.setModal(True)
         self.setStyleSheet("""
             QDialog { background-color: #181825; color: #CDD6F4; }
             QTextBrowser {
@@ -59,6 +61,7 @@ class LookupPopupDialog(QDialog):
         layout.addWidget(phrase_lbl)
 
         self.tabs = QTabWidget()
+        self.tabs.setDocumentMode(True)
 
         # Tab 1: Dictionary
         self.dict_browser = QTextBrowser()
@@ -136,6 +139,8 @@ class BookInfoDialog(QDialog):
         super().__init__(parent)
         self.setWindowTitle(f"Book Info & Reading Statistics — {book_record.get('title', 'Book')}")
         self.resize(620, 480)
+        self.setMinimumSize(540, 420)
+        self.setModal(True)
         self.setStyleSheet("""
             QDialog { background-color: #181825; color: #CDD6F4; }
             QFrame#StatCard {

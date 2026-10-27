@@ -2,7 +2,10 @@ import os
 import bisect
 import webbrowser
 import pymupdf
-from PySide6.QtCore import Qt, QSize, Signal, QEvent, QPoint, QPointF, QRect, QRectF, QTimer ,QVariantAnimation, QEasingCurve
+from PySide6.QtCore import (
+    Qt, QSize, Signal, QEvent, QPoint, QPointF, QRect, QRectF, QTimer,
+    QVariantAnimation, QEasingCurve, QSignalBlocker,
+)
 from PySide6.QtGui import (
     QPixmap, QFont, QCursor, QNativeGestureEvent, QPainter, QColor, QPen, QFontMetrics
 )
@@ -196,6 +199,15 @@ class DocumentCanvasView(QAbstractScrollArea):
         self._scroll_anim.setEasingCurve(QEasingCurve.OutCubic)
         self._scroll_anim.valueChanged.connect(self._on_smooth_scroll_step)
 
+        self._zoom_anim = QVariantAnimation(self)
+        self._zoom_anim.setDuration(240)
+        self._zoom_anim.setEasingCurve(QEasingCurve.OutCubic)
+        self._zoom_anim.valueChanged.connect(self._on_zoom_animation_step)
+        self._zoom_anim.finished.connect(self._finish_zoom_animation)
+        self._zoom_anchor = QPointF()
+        self._zooming = False
+        self._zoom_start = (1.25, 0, 0)
+
         # Detect if the user drags or clicks the scrollbar directly
         self.verticalScrollBar().sliderMoved.connect(self._on_user_manual_scroll)
         self.verticalScrollBar().actionTriggered.connect(self._on_scrollbar_action)
@@ -228,6 +240,9 @@ class DocumentCanvasView(QAbstractScrollArea):
     
     def set_zoom(self, new_zoom: float):
         """Sets the zoom level and re-renders the viewport."""
+        if self._zoom_anim.state() == QVariantAnimation.Running:
+            self._zoom_anim.stop()
+        self._zooming = False
         self.zoom = max(0.5, min(3.5, float(new_zoom)))
         self.zoom_changed.emit(self.zoom)
         if hasattr(self, "_cache") and isinstance(self._cache, dict):
@@ -235,6 +250,36 @@ class DocumentCanvasView(QAbstractScrollArea):
         if hasattr(self, "_pixmap_cache") and isinstance(self._pixmap_cache, dict):
             self._pixmap_cache.clear()
         self.viewport().update()
+
+    def animate_zoom_to(self, new_zoom: float, anchor_pos: QPointF):
+        """Animate zoom while keeping the point under the anchor stationary."""
+        if not self.doc or not self.page_y:
+            return
+        target_zoom = max(0.5, min(3.5, float(new_zoom)))
+        if abs(target_zoom - self.zoom) < 1e-3:
+            return
+
+        if self._zoom_anim.state() == QVariantAnimation.Running:
+            self._zoom_anim.stop()
+        self._zoom_anchor = anchor_pos
+        self._zooming = True
+        self._zoom_start = (
+            self.zoom,
+            self.verticalScrollBar().value(),
+            self.horizontalScrollBar().value(),
+        )
+        self._zoom_anim.setStartValue(self.zoom)
+        self._zoom_anim.setEndValue(target_zoom)
+        self._zoom_anim.start()
+
+    def _on_zoom_animation_step(self, value):
+        self._apply_zoom_at_anchor(float(value), self._zoom_anchor, emit_signal=False)
+
+    def _finish_zoom_animation(self):
+        self._zooming = False
+        self._sharp_timer.start()
+        if self.doc:
+            self.page_changed.emit(self.current_page, len(self.doc), self.zoom)
     
     def scroll_to_page(self, page_idx: int):
         """Scrolls the canvas view to the specified page index."""
@@ -869,7 +914,8 @@ class DocumentCanvasView(QAbstractScrollArea):
                 ):
                     idx += 1
             self.current_page = idx
-            self.page_changed.emit(self.current_page, len(self.doc), self.zoom)
+            if not self._zooming:
+                self.page_changed.emit(self.current_page, len(self.doc), self.zoom)
             self._prefetch_timer.start()  # <--- Added: schedule idle page pre-fetch
         self.viewport().update()
 
@@ -1021,28 +1067,53 @@ class DocumentCanvasView(QAbstractScrollArea):
         if not self.doc or not self.page_y:
             return
 
+        if self._zoom_anim.state() == QVariantAnimation.Running:
+            self._zoom_anim.stop()
+            self._zooming = False
         old_zoom = self.zoom
-        new_zoom = max(0.5, min(2.5, self.zoom * factor))
+        new_zoom = max(0.5, min(3.5, self.zoom * factor))
         if abs(new_zoom - old_zoom) < 1e-3:
             return
+        self._apply_zoom_at_anchor(new_zoom, anchor_pos, emit_signal=True)
 
-        ratio = new_zoom / old_zoom
+    def _apply_zoom_at_anchor(
+        self, new_zoom: float, anchor_pos: QPointF, emit_signal: bool
+    ):
+        old_zoom = self.zoom
+        new_zoom = max(0.5, min(3.5, float(new_zoom)))
+        if abs(new_zoom - old_zoom) < 1e-3:
+            return
+        if self._zooming:
+            start_zoom, start_scroll_y, start_scroll_x = self._zoom_start
+            ratio = new_zoom / start_zoom
+        else:
+            start_zoom = old_zoom
+            start_scroll_y = self.verticalScrollBar().value()
+            start_scroll_x = self.horizontalScrollBar().value()
+            ratio = new_zoom / start_zoom
         self.zoom = new_zoom
         self.selection_popup.hide()
 
-        old_scroll_y = self.verticalScrollBar().value()
-        old_scroll_x = self.horizontalScrollBar().value()
         ay = anchor_pos.y()
         ax = anchor_pos.x()
 
-        self._recalculate_layout()
+        with QSignalBlocker(self.verticalScrollBar()), QSignalBlocker(
+            self.horizontalScrollBar()
+        ):
+            self._recalculate_layout()
 
-        self.verticalScrollBar().setValue(int((old_scroll_y + ay) * ratio - ay))
-        self.horizontalScrollBar().setValue(int((old_scroll_x + ax) * ratio - ax))
+            content_y = start_scroll_y + ay - self.MARGIN_Y
+            content_x = start_scroll_x + ax - self.MARGIN_X
+            new_scroll_y = (content_y * ratio) + self.MARGIN_Y - ay
+            new_scroll_x = (content_x * ratio) + self.MARGIN_X - ax
+            self.verticalScrollBar().setValue(round(new_scroll_y))
+            self.horizontalScrollBar().setValue(round(new_scroll_x))
 
-        self.page_changed.emit(self.current_page, len(self.doc), self.zoom)
+        if emit_signal:
+            self.page_changed.emit(self.current_page, len(self.doc), self.zoom)
         self.viewport().update()
-        self._sharp_timer.start()
+        if emit_signal:
+            self._sharp_timer.start()
 
     def _rerender_sharp(self):
         for page_idx, (cached_zoom, _) in list(self._pixmap_cache.items()):
@@ -1202,6 +1273,7 @@ class BookCardWidget(QFrame):
         self.setObjectName("BookCard")
         self.setCursor(Qt.PointingHandCursor)
         self.setFixedSize(215, 340)
+        self.setToolTip(f"Open {book.get('title', 'Untitled')}")
         self.setStyleSheet("""
             QFrame#BookCard {
                 background-color: #181825;
@@ -1228,6 +1300,7 @@ class BookCardWidget(QFrame):
         top_row.setSpacing(4)
 
         fmt_badge = QLabel(book.get("format", "BOOK"))
+        fmt_badge.setAccessibleName(f"{book.get('format', 'BOOK')} format")
         fmt_badge.setStyleSheet(
             "color: #89B4FA; font-size: 10px; font-weight: bold; letter-spacing: 0.5px;"
         )
@@ -1288,6 +1361,7 @@ class BookCardWidget(QFrame):
 
         # Cover thumbnail — supports "cover_path", "cover_image", or "cover" keys
         cover_lbl = QLabel()
+        cover_lbl.setAccessibleName(f"Cover for {book.get('title', 'Untitled')}")
         cover_lbl.setFixedSize(191, 210)
         cover_lbl.setAlignment(Qt.AlignCenter)
         cover_lbl.setStyleSheet("background-color: #11111B; border-radius: 6px;")
@@ -1323,16 +1397,18 @@ class BookCardWidget(QFrame):
         title_lbl = QLabel(book.get("title", "Untitled"))
         title_lbl.setWordWrap(True)
         title_lbl.setFixedHeight(34)
+        title_lbl.setToolTip(book.get("title", "Untitled"))
         title_lbl.setStyleSheet("color: #CDD6F4; font-weight: bold; font-size: 12px;")
         metrics = QFontMetrics(title_lbl.font())
         elided_title = metrics.elidedText(
-            book.get("title", "Untitled"), Qt.ElideRight, 340
+            book.get("title", "Untitled"), Qt.ElideRight, 191
         )
         title_lbl.setText(elided_title)
         layout.addWidget(title_lbl)
 
         # Author
         author_lbl = QLabel(book.get("author", "Unknown Author"))
+        author_lbl.setToolTip(book.get("author", "Unknown Author"))
         author_lbl.setStyleSheet("color: #A6ADC8; font-size: 11px;")
         author_metrics = QFontMetrics(author_lbl.font())
         author_lbl.setText(
@@ -1345,7 +1421,7 @@ class BookCardWidget(QFrame):
         # Progress bar & page status
         cur = book.get("current_page", 0) + 1
         tot = max(1, book.get("total_pages", 1))
-        pct = int((cur / tot) * 100) if cur > 1 else 0
+        pct = min(100, int((cur / tot) * 100)) if cur > 1 else 0
 
         pbar = QProgressBar()
         pbar.setRange(0, 100)
@@ -1365,7 +1441,10 @@ class BookCardWidget(QFrame):
         """)
         layout.addWidget(pbar)
 
-        prog_lbl = QLabel(f"{pct}% (Page {cur} of {tot})")
+        prog_lbl = QLabel(
+            "Completed" if pct >= 100 else f"{pct}% • Page {cur} of {tot}"
+        )
+        prog_lbl.setAccessibleName(f"Reading progress: {pct} percent")
         prog_lbl.setStyleSheet("color: #6C7086; font-size: 10px;")
         layout.addWidget(prog_lbl)
 

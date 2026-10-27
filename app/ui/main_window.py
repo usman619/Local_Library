@@ -97,7 +97,11 @@ class MultiFolderImportDialog(QDialog):
         dlg.setFileMode(QFileDialog.Directory)
         dlg.setOption(QFileDialog.ShowDirsOnly, True)
 
-        for view in dlg.findChildren((QListView, QTreeView)):
+        folder_views = [
+            *dlg.findChildren(QListView),
+            *dlg.findChildren(QTreeView),
+        ]
+        for view in folder_views:
             view.setSelectionMode(QAbstractItemView.ExtendedSelection)
 
         if dlg.exec():
@@ -150,16 +154,19 @@ class LocalLibraryWindow(QMainWindow):
 
     def _build_toolbar(self):
         toolbar = QToolBar("Main Toolbar")
+        toolbar.setObjectName("MainToolbar")
         toolbar.setMovable(False)
         self.addToolBar(toolbar)
 
         # ---- Library-Only Actions (Shown ONLY on Library Home) ----
         btn_add_files = QPushButton("+ Add Books")
+        btn_add_files.setAccessibleName("Add books")
         btn_add_files.setToolTip("Select one or multiple eBook/PDF files to import")
         btn_add_files.clicked.connect(self.import_multiple_files_dialog)
         act_files = toolbar.addWidget(btn_add_files)
 
         btn_add_folders = QPushButton("+ Import Folders")
+        btn_add_folders.setAccessibleName("Import folders")
         btn_add_folders.setToolTip("Import all supported books from one or multiple folders")
         btn_add_folders.clicked.connect(self.import_multiple_folders_dialog)
         act_folders = toolbar.addWidget(btn_add_folders)
@@ -170,6 +177,7 @@ class LocalLibraryWindow(QMainWindow):
 
         # ---- Reader-Only Actions (Shown ONLY when reading a book) ----
         btn_home = QPushButton("Library Home")
+        btn_home.setAccessibleName("Return to library")
         btn_home.setToolTip("Close current book and return to Library Home")
         btn_home.clicked.connect(self.show_library_view)
         act_home = toolbar.addWidget(btn_home)
@@ -177,6 +185,7 @@ class LocalLibraryWindow(QMainWindow):
         sep2 = toolbar.addSeparator()
 
         btn_sidebar = QPushButton("Sidebar")
+        btn_sidebar.setAccessibleName("Toggle reader sidebar")
         btn_sidebar.setToolTip("Toggle Contents / Bookmarks / Highlights / Search Sidebar")
         btn_sidebar.clicked.connect(self.reader_view.toggle_sidebar)
         act_sidebar = toolbar.addWidget(btn_sidebar)
@@ -190,17 +199,20 @@ class LocalLibraryWindow(QMainWindow):
             "Single Page",
             "Two-Column Spread",
         ])
+        self.combo_view_mode.setAccessibleName("Reader view mode")
         self.combo_view_mode.setToolTip("Switch between Continuous, Single, and Two-Column Spread")
         self.combo_view_mode.currentTextChanged.connect(self.reader_view.set_view_mode)
         act_view_mode = toolbar.addWidget(self.combo_view_mode)
 
         btn_prev_page = QPushButton("◀")
+        btn_prev_page.setAccessibleName("Previous page or spread")
         btn_prev_page.setToolTip("Previous Page / Spread (Left Arrow / PageUp)")
         btn_prev_page.setFixedWidth(34)
         btn_prev_page.clicked.connect(self.reader_view.step_prev_page)
         act_prev_p = toolbar.addWidget(btn_prev_page)
 
         btn_next_page = QPushButton("▶")
+        btn_next_page.setAccessibleName("Next page or spread")
         btn_next_page.setToolTip("Next Page / Spread (Right Arrow / PageDown / Space)")
         btn_next_page.setFixedWidth(34)
         btn_next_page.clicked.connect(self.reader_view.step_next_page)
@@ -210,37 +222,47 @@ class LocalLibraryWindow(QMainWindow):
         act_lbl_theme = toolbar.addWidget(lbl_theme)
 
         self.combo_theme = QComboBox()
+        self.combo_theme.setAccessibleName("Reader theme")
         self.combo_theme.addItems(list(THEMES.keys()))
         self.combo_theme.setCurrentText(self.reader_view.theme_name)
         self.combo_theme.currentTextChanged.connect(self.reader_view.set_theme)
         act_theme = toolbar.addWidget(self.combo_theme)
 
         btn_zoom_out = QPushButton("A-")
+        btn_zoom_out.setAccessibleName("Zoom out")
         btn_zoom_out.setToolTip("Zoom Out")
         btn_zoom_out.clicked.connect(lambda: self.reader_view.adjust_zoom(-0.15))
         act_zout = toolbar.addWidget(btn_zoom_out)
 
         btn_zoom_in = QPushButton("A+")
+        btn_zoom_in.setAccessibleName("Zoom in")
         btn_zoom_in.setToolTip("Zoom In")
         btn_zoom_in.clicked.connect(lambda: self.reader_view.adjust_zoom(+0.15))
         act_zin = toolbar.addWidget(btn_zoom_in)
 
         btn_bookmark = QPushButton("Bookmark")
+        btn_bookmark.setAccessibleName("Toggle bookmark")
         btn_bookmark.setToolTip("Toggle Bookmark on Current Page")
         btn_bookmark.clicked.connect(self.reader_view.toggle_bookmark)
         act_bm = toolbar.addWidget(btn_bookmark)
 
         btn_find = QPushButton("Find (Ctrl+F)")
+        btn_find.setAccessibleName("Find in book")
         btn_find.setToolTip("Search text inside the book (Ctrl+F)")
         btn_find.clicked.connect(self.reader_view.open_search_bar)
         act_find = toolbar.addWidget(btn_find)
 
         btn_info = QPushButton("Info")
+        btn_info.setAccessibleName("Book information")
         btn_info.setToolTip("View Reading Statistics & Book Metadata")
         btn_info.clicked.connect(self.reader_view.open_book_info_dialog)
         act_info = toolbar.addWidget(btn_info)
 
         self.lbl_page_status = QLabel("")
+        self.lbl_page_status.setObjectName("PageStatus")
+        self.lbl_page_status.setAccessibleName("Current page and zoom status")
+        self.lbl_page_status.setAlignment(Qt.AlignCenter)
+        self.lbl_page_status.setMinimumWidth(170)
         act_status = toolbar.addWidget(self.lbl_page_status)
 
         self.reader_only_actions = [
@@ -312,11 +334,12 @@ class LocalLibraryWindow(QMainWindow):
         if not paths:
             return
 
-        self._batch_import_files(paths)
-        if len(paths) == 1:
+        import_result = self._batch_import_files(paths)
+        if len(paths) == 1 and not self._last_import_cancelled:
             self.open_book(paths[0])
         else:
             self.show_library_view()
+            self._show_import_summary(import_result, "File Import")
 
     def import_multiple_folders_dialog(self):
         dlg = MultiFolderImportDialog(self)
@@ -342,32 +365,46 @@ class LocalLibraryWindow(QMainWindow):
             )
             return
 
-        imported_count = self._batch_import_files(found_files)
+        import_result = self._batch_import_files(found_files)
         self.show_library_view()
+        self._show_import_summary(import_result, "Folder Import")
+
+    def _show_import_summary(self, result: dict[str, int], source: str):
+        status = "cancelled" if self._last_import_cancelled else "complete"
         QMessageBox.information(
             self,
-            "Folder Import Complete",
-            f"Successfully imported {imported_count} book(s) from {len(dlg.folders)} folder(s).",
+            f"{source} {status.title()}",
+            (
+                f"Added: {result['added']}\n"
+                f"Updated: {result['updated']}\n"
+                f"Skipped or failed: {result['failed']}"
+            ),
         )
 
-    def _batch_import_files(self, filepaths: list[str]) -> int:
+    def _batch_import_files(self, filepaths: list[str]) -> dict[str, int]:
         progress = QProgressDialog("Importing books into library...", "Cancel", 0, len(filepaths), self)
         progress.setWindowTitle("Importing Books")
         progress.setWindowModality(Qt.WindowModal)
         progress.setMinimumDuration(0)
+        self._last_import_cancelled = False
 
-        imported = 0
+        result = {"added": 0, "updated": 0, "failed": 0}
         for idx, fpath in enumerate(filepaths):
             if progress.wasCanceled():
+                self._last_import_cancelled = True
                 break
             progress.setLabelText(f"Importing ({idx + 1}/{len(filepaths)}):\n{Path(fpath).name}")
             progress.setValue(idx)
             QApplication.processEvents()
+            book_id = self.store.book_id(fpath)
+            existed = book_id in self.store.books
             if self.store.add_or_update_book(fpath):
-                imported += 1
+                result["updated" if existed else "added"] += 1
+            else:
+                result["failed"] += 1
 
         progress.setValue(len(filepaths))
-        return imported
+        return result
 
     def remove_book_from_library(self, filepath: str):
         self.store.remove_book(filepath)

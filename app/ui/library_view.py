@@ -1,7 +1,7 @@
 import os
 from pathlib import Path
 from PySide6.QtCore import Qt, Signal, QTimer, QPoint, QUrl
-from PySide6.QtGui import QFont, QDesktopServices
+from PySide6.QtGui import QFont, QDesktopServices, QKeySequence, QShortcut
 from PySide6.QtWidgets import (
     QWidget, QVBoxLayout, QHBoxLayout, QLabel, QLineEdit,
     QComboBox, QScrollArea, QGridLayout, QFrame, QPushButton,
@@ -126,25 +126,32 @@ class LibraryView(QWidget):
         fb_layout.setSpacing(10)
 
         self.search_input = QLineEdit()
-        self.search_input.setPlaceholderText("Search by title, author, or category...")
+        self.search_input.setAccessibleName("Library search")
+        self.search_input.setToolTip("Search titles, authors, and categories (Ctrl+L)")
+        self.search_input.setPlaceholderText("Search titles, authors, or categories…")
         self.search_input.setClearButtonEnabled(True)
         self.search_input.textChanged.connect(self._on_filters_changed)
         fb_layout.addWidget(self.search_input, stretch=1)
+        self.shortcut_search = QShortcut(QKeySequence("Ctrl+L"), self)
+        self.shortcut_search.activated.connect(self._focus_library_search)
 
         fb_layout.addWidget(QLabel("Format:"))
         self.combo_format = QComboBox()
+        self.combo_format.setAccessibleName("Format filter")
         self.combo_format.addItems(["All Formats", "PDF", "EPUB", "MOBI", "FB2", "CBZ", "TXT"])
         self.combo_format.currentTextChanged.connect(self._on_filters_changed)
         fb_layout.addWidget(self.combo_format)
 
         fb_layout.addWidget(QLabel("Status:"))
         self.combo_status = QComboBox()
+        self.combo_status.setAccessibleName("Reading status filter")
         self.combo_status.addItems(["All Status", "Reading", "Unread", "Completed"])
         self.combo_status.currentTextChanged.connect(self._on_filters_changed)
         fb_layout.addWidget(self.combo_status)
 
         fb_layout.addWidget(QLabel("Sort by:"))
         self.combo_sort = QComboBox()
+        self.combo_sort.setAccessibleName("Library sort order")
         self.combo_sort.addItems([
             "Recently Opened",
             "Title (A–Z)",
@@ -218,6 +225,7 @@ class LibraryView(QWidget):
         """
 
         self.btn_new_folder = QPushButton("+ New Folder")
+        self.btn_new_folder.setAccessibleName("Create new folder")
         self.btn_new_folder.setCursor(Qt.PointingHandCursor)
         self.btn_new_folder.setToolTip("Create a new virtual category/folder to group your books")
         self.btn_new_folder.setStyleSheet(action_btn_style)
@@ -257,6 +265,10 @@ class LibraryView(QWidget):
 
         self.scroll.setWidget(self.grid_container)
         root_layout.addWidget(self.scroll, stretch=1)
+
+    def _focus_library_search(self):
+        self.search_input.setFocus()
+        self.search_input.selectAll()
 
     # ---- VIRTUAL CATEGORY PILLS & CRUD DIALOGS ----
 
@@ -605,6 +617,7 @@ class LibraryView(QWidget):
             btn_row.setAlignment(Qt.AlignCenter)
 
             btn_add = QPushButton("+ Add Books")
+            btn_add.setAccessibleName("Add books to library")
             btn_add.setCursor(Qt.PointingHandCursor)
             btn_add.setStyleSheet("""
                 QPushButton {
@@ -624,6 +637,7 @@ class LibraryView(QWidget):
             btn_row.addWidget(btn_add)
 
             btn_folder = QPushButton("+ Import Folders")
+            btn_folder.setAccessibleName("Import books from folders")
             btn_folder.setCursor(Qt.PointingHandCursor)
             btn_folder.setStyleSheet("""
                 QPushButton {

@@ -10,13 +10,29 @@ QMainWindow, QWidget {
 QToolBar {
     background-color: #181825;
     border-bottom: 1px solid #313244;
-    padding: 6px 12px;
-    spacing: 8px;
+    padding: 5px 8px;
+    spacing: 4px;
+}
+QToolBar#MainToolbar QPushButton {
+    padding: 5px 9px;
+    border-radius: 6px;
+}
+QToolBar#MainToolbar QComboBox {
+    padding: 4px 8px;
+    border-radius: 6px;
 }
 QToolBar::separator {
     background-color: #313244;
     width: 1px;
     margin: 4px 6px;
+}
+QFrame#TTSBar {
+    background-color: #181825;
+    border-top: 1px solid #313244;
+}
+QLabel#TTSStatus {
+    color: #A6ADC8;
+    padding: 2px 6px 4px 6px;
 }
 
 /* ---- Buttons ---- */
@@ -24,8 +40,8 @@ QPushButton {
     background-color: #1E1E2E;
     color: #CDD6F4;
     border: 1px solid #313244;
-    border-radius: 7px;
-    padding: 6px 13px;
+    border-radius: 8px;
+    padding: 7px 13px;
     font-weight: 600;
 }
 QPushButton:hover {
@@ -45,6 +61,19 @@ QPushButton:disabled {
     background-color: #181825;
     color: #585B70;
     border-color: #1E1E2E;
+}
+QPushButton:focus, QComboBox:focus, QLineEdit:focus,
+QTreeWidget:focus, QListWidget:focus, QTabBar::tab:focus {
+    border: 1px solid #89B4FA;
+    outline: none;
+}
+QLabel#PageStatus {
+    color: #A6ADC8;
+    background-color: #11111B;
+    border: 1px solid #313244;
+    border-radius: 8px;
+    padding: 6px 10px;
+    font-weight: 600;
 }
 
 /* ---- ComboBoxes ---- */
@@ -73,6 +102,14 @@ QComboBox QAbstractItemView {
     border-radius: 6px;
     padding: 4px;
     outline: none;
+}
+
+QLineEdit {
+    selection-background-color: #89B4FA;
+    selection-color: #11111B;
+}
+QLineEdit::placeholder {
+    color: #6C7086;
 }
 
 /* ---- Sidebar Tabs & Trees ---- */
@@ -110,23 +147,15 @@ QTreeWidget, QListWidget {
 }
 QTreeWidget::branch {
     background: transparent;
-    border: none;
-}
-QTreeWidget::branch:has-children:!has-siblings:closed,
-QTreeWidget::branch:closed:has-children:has-siblings {
-    border-image: none;
-    image: none;
-}
-QTreeWidget::branch:open:has-children:!has-siblings,
-QTreeWidget::branch:open:has-children:has-siblings {
-    border-image: none;
-    image: none;
 }
 QTreeWidget::item, QListWidget::item {
-    padding: 6px 10px;
+    padding: 7px 10px;
     border-radius: 6px;
     margin-bottom: 2px;
     border: none;
+}
+QTreeWidget::item {
+    min-height: 28px;
 }
 QTreeWidget::item:hover, QListWidget::item:hover {
     background-color: #252538;

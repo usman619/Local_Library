@@ -1,7 +1,7 @@
 from pathlib import Path
 import pymupdf
 from PySide6.QtCore import Qt, Signal, QTimer, QPoint, QPointF, QUrl, QRectF, QEvent
-from PySide6.QtGui import QColor, QIcon, QKeySequence, QPainter, QPainterPath, QPixmap, QShortcut
+from PySide6.QtGui import QColor, QKeySequence, QShortcut
 from PySide6.QtWidgets import (
     QWidget, QVBoxLayout, QHBoxLayout, QSplitter, QTabWidget,
     QTreeWidget, QTreeWidgetItem, QListWidget, QListWidgetItem,
@@ -44,6 +44,7 @@ class ReaderView(QWidget):
         self.current_search_idx: int = -1
 
         self.tts_worker: NeuralTTSWorker | None = None
+        self._initializing_toc = False
         self._build_ui()
         self._setup_shortcuts()
 
@@ -82,6 +83,8 @@ class ReaderView(QWidget):
 
         sb_layout.addWidget(QLabel("Find:"))
         self.search_input = QLineEdit()
+        self.search_input.setAccessibleName("Search in document")
+        self.search_input.setToolTip("Search in this book (Enter: next, Shift+Enter: previous, Esc: close)")
         self.search_input.setPlaceholderText("Find in document (Enter = Next, Shift+Enter = Previous, Esc = Close)...")
         self.search_input.setMinimumWidth(320)
         self._search_timer = QTimer(self)
@@ -97,17 +100,21 @@ class ReaderView(QWidget):
         self.lbl_search_count.setStyleSheet("color: #A6ADC8; font-size: 12px;")
         sb_layout.addWidget(self.lbl_search_count)
 
-        btn_prev_match = QPushButton("▲")
-        btn_prev_match.setToolTip("Previous Match (Shift+Enter)")
-        btn_prev_match.setFixedWidth(36)
-        btn_prev_match.clicked.connect(self.find_prev)
-        sb_layout.addWidget(btn_prev_match)
+        self.btn_prev_match = QPushButton("▲")
+        self.btn_prev_match.setAccessibleName("Previous search match")
+        self.btn_prev_match.setToolTip("Previous Match (Shift+Enter)")
+        self.btn_prev_match.setFixedWidth(36)
+        self.btn_prev_match.setEnabled(False)
+        self.btn_prev_match.clicked.connect(self.find_prev)
+        sb_layout.addWidget(self.btn_prev_match)
 
-        btn_next_match = QPushButton("▼")
-        btn_next_match.setToolTip("Next Match (Enter)")
-        btn_next_match.setFixedWidth(36)
-        btn_next_match.clicked.connect(self.find_next)
-        sb_layout.addWidget(btn_next_match)
+        self.btn_next_match = QPushButton("▼")
+        self.btn_next_match.setAccessibleName("Next search match")
+        self.btn_next_match.setToolTip("Next Match (Enter)")
+        self.btn_next_match.setFixedWidth(36)
+        self.btn_next_match.setEnabled(False)
+        self.btn_next_match.clicked.connect(self.find_next)
+        sb_layout.addWidget(self.btn_next_match)
 
         sb_layout.addStretch(1)
 
@@ -129,9 +136,26 @@ class ReaderView(QWidget):
 
         self.toc_tree = QTreeWidget()
         self.toc_tree.setHeaderHidden(True)
-        self.toc_tree.setFocusPolicy(Qt.NoFocus)
-        self.toc_tree.setIndentation(16)
+        self.toc_tree.setFocusPolicy(Qt.StrongFocus)
+        self.toc_tree.setIndentation(18)
+        self.toc_tree.setUniformRowHeights(True)
+        self.toc_tree.setTextElideMode(Qt.ElideRight)
+        self.toc_tree.setAnimated(True)
+        self.toc_tree.setExpandsOnDoubleClick(False)
+        self.toc_tree.setRootIsDecorated(True)
+        self.toc_tree.setItemsExpandable(True)
+        self.toc_tree.setAlternatingRowColors(False)
+        toc_icon_dir = Path(__file__).resolve().parents[2] / "images"
+        self.toc_tree.setStyleSheet(
+            "QTreeWidget::branch:closed:has-children {"
+            f" image: url({(toc_icon_dir / 'toc-chevron-right.svg').as_posix()});"
+            " }"
+            "QTreeWidget::branch:open:has-children {"
+            f" image: url({(toc_icon_dir / 'toc-chevron-down.svg').as_posix()});"
+            " }"
+        )
         self.toc_tree.itemClicked.connect(self._on_toc_clicked)
+        self.toc_tree.viewport().installEventFilter(self)
         self.sidebar_tabs.addTab(self.toc_tree, "Contents")
 
         self.bookmarks_list = QListWidget()
@@ -187,6 +211,7 @@ class ReaderView(QWidget):
 
         # ---- BOTTOM STATEFUL NEURAL TTS CONTROL BAR ----
         tts_bar = QFrame()
+        tts_bar.setObjectName("TTSBar")
         tts_bar.setStyleSheet(
             "QFrame { background-color: #181825; border-top: 1px solid #313244; padding: 6px 12px; }"
         )
@@ -197,10 +222,14 @@ class ReaderView(QWidget):
         controls_row = QHBoxLayout()
         controls_row.setSpacing(8)
 
-        controls_row.addWidget(QLabel("Voice:"))
+        voice_label = QLabel("Voice:")
+        voice_label.setAccessibleName("Text to speech voice")
+        controls_row.addWidget(voice_label)
         self.combo_voice = QComboBox()
+        self.combo_voice.setAccessibleName("Text to speech voice")
         self.combo_voice.addItems(TTS_VOICES)
-        self.combo_voice.setMinimumWidth(260)
+        self.combo_voice.setMinimumWidth(180)
+        self.combo_voice.setMaximumWidth(320)
         self.combo_voice.setToolTip("Select Neural TTS Voice (saved automatically)")
         saved_global_voice = self.store.settings.get("tts_voice", TTS_VOICES[0])
         if saved_global_voice in TTS_VOICES:
@@ -220,6 +249,7 @@ class ReaderView(QWidget):
         controls_row.addWidget(self.btn_prev_para)
 
         self.btn_tts_play_pause = QPushButton("▶")
+        self.btn_tts_play_pause.setAccessibleName("Play or pause text to speech")
         self.btn_tts_play_pause.setStyleSheet(
             "QPushButton { padding: 0px; font-size: 15px; min-width: 40px; max-width: 40px; "
             "min-height: 30px; max-height: 30px; background-color: #89B4FA; color: #11111B; border: none; }"
@@ -230,6 +260,7 @@ class ReaderView(QWidget):
         controls_row.addWidget(self.btn_tts_play_pause)
 
         self.btn_tts_stop = QPushButton("⏹")
+        self.btn_tts_stop.setAccessibleName("Stop text to speech")
         self.btn_tts_stop.setStyleSheet(icon_btn_style)
         self.btn_tts_stop.setToolTip("Stop TTS and Clear Highlight")
         self.btn_tts_stop.clicked.connect(self.stop_tts)
@@ -294,6 +325,9 @@ class ReaderView(QWidget):
         tts_bar_layout.addLayout(controls_row)
 
         self.lbl_tts_status = QLabel("TTS Ready — Select any text and click '▶ Read' or press ▶ to start")
+        self.lbl_tts_status.setObjectName("TTSStatus")
+        self.lbl_tts_status.setWordWrap(True)
+        self.lbl_tts_status.setAccessibleName("Text to speech status")
         self.lbl_tts_status.setStyleSheet("color: #A6E3A1; font-size: 12px;")
         tts_bar_layout.addWidget(self.lbl_tts_status)
 
@@ -333,8 +367,19 @@ class ReaderView(QWidget):
         self.shortcut_find_prev = QShortcut(QKeySequence("Ctrl+Shift+G"), self)
         self.shortcut_find_prev.activated.connect(self.find_prev)
 
+        self.shortcut_bookmark = QShortcut(QKeySequence("Ctrl+D"), self)
+        self.shortcut_bookmark.activated.connect(self.toggle_bookmark)
+
+        self.shortcut_sidebar = QShortcut(QKeySequence("Ctrl+Shift+S"), self)
+        self.shortcut_sidebar.activated.connect(self.toggle_sidebar)
+
+        self.shortcut_reset_zoom = QShortcut(QKeySequence("Ctrl+0"), self)
+        self.shortcut_reset_zoom.activated.connect(self.reset_zoom)
+
     def eventFilter(self, obj, event):
-        if obj is self.search_input and event.type() == QEvent.KeyPress:
+        search_input = getattr(self, "search_input", None)
+        toc_tree = getattr(self, "toc_tree", None)
+        if obj is search_input and event.type() == QEvent.KeyPress:
             if event.key() in (Qt.Key_Return, Qt.Key_Enter):
                 if event.modifiers() & Qt.ShiftModifier:
                     self.find_prev()
@@ -344,6 +389,24 @@ class ReaderView(QWidget):
             elif event.key() == Qt.Key_Escape:
                 self.close_search_bar()
                 return True
+        if (
+            toc_tree is not None
+            and obj is toc_tree.viewport()
+            and event.type() == QEvent.MouseButtonPress
+        ):
+            if event.button() == Qt.LeftButton:
+                pos = event.position().toPoint()
+                item = toc_tree.itemAt(pos)
+                if item is not None and item.childCount() > 0:
+                    depth = 0
+                    parent = item.parent()
+                    while parent is not None:
+                        depth += 1
+                        parent = parent.parent()
+                    branch_gutter_width = toc_tree.indentation() * (depth + 1)
+                    if pos.x() < branch_gutter_width:
+                        item.setExpanded(not item.isExpanded())
+                        return True
         return super().eventFilter(obj, event)
     
     def _on_canvas_selection_changed(
@@ -357,29 +420,11 @@ class ReaderView(QWidget):
         else:
             self.canvas.selection_popup.hide()
     
-    def _sync_toc_selection(self, page_idx: int):
+    def _sync_toc_selection(self, page_idx: int, expand_ancestors: bool = True):
         """Synchronizes the Table of Contents tree selection with the active page index."""
         if not hasattr(self, "toc_tree") or not self.toc_tree:
             return
-        # Find the TOC item closest to page_idx without exceeding it
-        best_item = None
-        root = self.toc_tree.invisibleRootItem()
-        
-        def _search(parent_item):
-            nonlocal best_item
-            for i in range(parent_item.childCount()):
-                child = parent_item.child(i)
-                data = child.data(0, Qt.UserRole)
-                if isinstance(data, int) and data <= page_idx:
-                    best_item = child
-                _search(child)
-
-        _search(root)
-        if best_item:
-            self.toc_tree.blockSignals(True)
-            self.toc_tree.setCurrentItem(best_item)
-            self.toc_tree.scrollToItem(best_item)
-            self.toc_tree.blockSignals(False)
+        self._sync_toc_to_page(page_idx, expand_ancestors=expand_ancestors)
 
     # -----------------------------------------------------------------
     # IN-BOOK SEARCH (Ctrl+F, Next/Prev Match & Sidebar Snippets)
@@ -405,7 +450,12 @@ class ReaderView(QWidget):
 
         query = self.search_input.text().strip()
         if not self.doc or len(query) < 2:
-            self.lbl_search_count.setText("0 matches")
+            self.lbl_search_count.setText(
+                "Enter 2+ characters" if query else "0 matches"
+            )
+            self.lbl_search_count.setStyleSheet("color: #A6ADC8; font-size: 12px;")
+            self.btn_prev_match.setEnabled(False)
+            self.btn_next_match.setEnabled(False)
             self.canvas.clear_search_overlays()
             return
 
@@ -443,10 +493,14 @@ class ReaderView(QWidget):
         if not self.search_results:
             self.lbl_search_count.setText("No matches")
             self.lbl_search_count.setStyleSheet("color: #F38BA8; font-size: 12px;")
+            self.btn_prev_match.setEnabled(False)
+            self.btn_next_match.setEnabled(False)
             self.canvas.clear_search_overlays()
             return
 
         self.lbl_search_count.setStyleSheet("color: #A6E3A1; font-size: 12px;")
+        self.btn_prev_match.setEnabled(True)
+        self.btn_next_match.setEnabled(True)
         cur_p = self.current_book.get("current_page", 0) if self.current_book else 0
         first_idx = 0
         for idx, (p_idx, _, _) in enumerate(self.search_results):
@@ -534,12 +588,14 @@ class ReaderView(QWidget):
             max(0, int(self.current_book.get("current_page", 0))),
             len(self.doc) - 1,
         )
-        QTimer.singleShot(40, lambda: self.jump_to_page(saved_page))
-
         saved_zoom = float(self.current_book.get("zoom", 1.25))
         self.canvas.set_zoom(saved_zoom)
-        self.canvas.scroll_to_page(saved_page)
-        self._sync_toc_selection(saved_page)
+        self._initializing_toc = True
+        try:
+            self.canvas.scroll_to_page(saved_page)
+        finally:
+            self._initializing_toc = False
+        self._sync_toc_selection(saved_page, expand_ancestors=False)
         self._emit_status()
 
     def close_book(self):
@@ -615,7 +671,9 @@ class ReaderView(QWidget):
             return
         self.current_book["current_page"] = page_idx
         self.store.save()
-        self._sync_toc_selection(page_idx)
+        self._sync_toc_selection(
+            page_idx, expand_ancestors=not self._initializing_toc
+        )
         self._emit_status()
 
     def _on_canvas_zoom_changed(self, new_zoom: float):
@@ -626,13 +684,11 @@ class ReaderView(QWidget):
     
     def zoom_in(self):
         if self.doc:
-            self.canvas.set_zoom(min(3.5, round(self.canvas.zoom + 0.15, 2)))
-            self._emit_status()
+            self.adjust_zoom(0.15)
 
     def zoom_out(self):
         if self.doc:
-            self.canvas.set_zoom(max(0.5, round(self.canvas.zoom - 0.15, 2)))
-            self._emit_status()
+            self.adjust_zoom(-0.15)
 
     def jump_to_page(self, page_index: int):
         self.canvas.jump_to_page(page_index)
@@ -647,8 +703,13 @@ class ReaderView(QWidget):
             return
         vp = self.canvas.viewport()
         center_pt = QPointF(vp.width() / 2.0, vp.height() / 2.0)
-        factor = (self.canvas.zoom + delta) / self.canvas.zoom
-        self.canvas.apply_zoom_factor(factor, center_pt)
+        self.canvas.animate_zoom_to(self.canvas.zoom + delta, center_pt)
+
+    def reset_zoom(self):
+        if self.doc:
+            vp = self.canvas.viewport()
+            center_pt = QPointF(vp.width() / 2.0, vp.height() / 2.0)
+            self.canvas.animate_zoom_to(1.25, center_pt)
 
     def toggle_sidebar(self):
         self.sidebar_tabs.setVisible(not self.sidebar_tabs.isVisible())
@@ -656,42 +717,22 @@ class ReaderView(QWidget):
     # -----------------------------------------------------------------
     # TOC, BOOKMARKS & MULTI-COLOR HIGHLIGHTS
     # -----------------------------------------------------------------
-    @staticmethod
-    def _make_arrow_icon(direction: str, color: str = "#7F849C", size: int = 12) -> QIcon:
-        """Create a small arrow QIcon using QPainter (right ▶ or down ▼)."""
-        pixmap = QPixmap(size, size)
-        pixmap.fill(Qt.transparent)
-        painter = QPainter(pixmap)
-        painter.setRenderHint(QPainter.Antialiasing)
-        painter.setBrush(QColor(color))
-        painter.setPen(Qt.NoPen)
-        path = QPainterPath()
-        if direction == "right":
-            path.moveTo(3, 1)
-            path.lineTo(size - 2, size / 2)
-            path.lineTo(3, size - 1)
-        else:  # down
-            path.moveTo(1, 3)
-            path.lineTo(size - 1, 3)
-            path.lineTo(size / 2, size - 2)
-        path.closeSubpath()
-        painter.drawPath(path)
-        painter.end()
-        return QIcon(pixmap)
-
     def _populate_toc(self):
         self.toc_tree.clear()
         self._toc_items: list[tuple[int, QTreeWidgetItem]] = []
         if not self.doc:
             return
-        # Build the arrow icons once
-        self._icon_collapsed = self._make_arrow_icon("right", "#7F849C")
-        self._icon_expanded = self._make_arrow_icon("down", "#7F849C")
         toc = self.doc.get_toc()
         stack = [(0, self.toc_tree.invisibleRootItem())]
         for lvl, title, page_num in toc:
-            page_idx = max(0, page_num - 1)
-            item = QTreeWidgetItem([f"{title}  (p. {page_num})"])
+            if not isinstance(page_num, int) or page_num <= 0:
+                continue
+            title = " ".join(str(title).split()) or "Untitled section"
+            page_idx = page_num - 1
+            label = f"{title}  ·  p. {page_num}"
+            item = QTreeWidgetItem([label])
+            item.setToolTip(0, f"{title}\nPage {page_num}")
+            item.setStatusTip(0, f"Go to {title} (page {page_num})")
             item.setData(0, Qt.UserRole, page_idx)
             while stack and stack[-1][0] >= lvl:
                 stack.pop()
@@ -699,8 +740,8 @@ class ReaderView(QWidget):
             parent.addChild(item)
             stack.append((lvl, item))
             self._toc_items.append((page_idx, item))
-        # Expand tree, then set icons to match state
-        self.toc_tree.expandToDepth(1)
+        # Start compact; users can expand only the branches they need.
+        self.toc_tree.collapseAll()
         self._update_toc_icons()
         # Connect expand/collapse signals (only once)
         if not getattr(self, '_toc_signals_connected', False):
@@ -709,25 +750,18 @@ class ReaderView(QWidget):
             self._toc_signals_connected = True
 
     def _update_toc_icons(self):
-        """Set expand/collapse arrow icons on TOC items that have children."""
-        for _p, item in self._toc_items:
-            if item.childCount() > 0:
-                icon = self._icon_expanded if item.isExpanded() else self._icon_collapsed
-                item.setIcon(0, icon)
-            else:
-                item.setIcon(0, QIcon())
+        """Use the native tree branch indicator, positioned before the label."""
+        return
 
     def _on_toc_item_expanded(self, item: QTreeWidgetItem):
-        """Swap to down-arrow icon when a TOC item is expanded."""
-        if item.childCount() > 0:
-            item.setIcon(0, self._icon_expanded)
+        return
 
     def _on_toc_item_collapsed(self, item: QTreeWidgetItem):
-        """Swap to right-arrow icon when a TOC item is collapsed."""
-        if item.childCount() > 0:
-            item.setIcon(0, self._icon_collapsed)
+        return
 
-    def _highlight_toc_item(self, active_item: QTreeWidgetItem):
+    def _highlight_toc_item(
+        self, active_item: QTreeWidgetItem, expand_ancestors: bool = True
+    ):
         """Applies a single unified highlight to active_item and clears old bold/color states."""
         if not getattr(self, "_toc_items", None):
             return
@@ -744,23 +778,23 @@ class ReaderView(QWidget):
             item.setForeground(0, QColor("#89B4FA" if is_curr else "#CDD6F4"))
             # Set background explicitly: active item gets subtle highlight, others get transparent
             if is_curr:
-                item.setBackground(0, QColor(49, 50, 68, 150))
+                item.setBackground(0, QColor("#313244"))
             else:
-                item.setBackground(0, QColor(0, 0, 0, 0))
+                item.setBackground(0, QColor("#181825"))
         
-        parent = active_item.parent()
-        while parent is not None:
-            parent.setExpanded(True)
-            # Update icon since signals are blocked
-            if parent.childCount() > 0:
-                parent.setIcon(0, self._icon_expanded)
-            parent = parent.parent()
+        if expand_ancestors:
+            parent = active_item.parent()
+            while parent is not None:
+                parent.setExpanded(True)
+                parent = parent.parent()
 
         self.toc_tree.setCurrentItem(active_item)
         self.toc_tree.scrollToItem(active_item, QTreeWidget.PositionAtCenter)
         self.toc_tree.blockSignals(False)
 
-    def _sync_toc_to_page(self, current_page_idx: int):
+    def _sync_toc_to_page(
+        self, current_page_idx: int, expand_ancestors: bool = True
+    ):
         """Highlights and scrolls to the active chapter/section in the Contents tree while scrolling."""
         if not getattr(self, "_toc_items", None):
             return
@@ -781,12 +815,11 @@ class ReaderView(QWidget):
             active_item = self._toc_items[0][1]
 
         if self.toc_tree.currentItem() is not active_item:
-            self._highlight_toc_item(active_item)
+            self._highlight_toc_item(
+                active_item, expand_ancestors=expand_ancestors
+            )
 
     def _on_toc_clicked(self, item: QTreeWidgetItem, _col: int):
-        # Toggle expand/collapse when clicking items with children
-        if item.childCount() > 0:
-            item.setExpanded(not item.isExpanded())
         page_idx = item.data(0, Qt.UserRole)
         if page_idx is not None:
             self._highlight_toc_item(item)

@@ -93,8 +93,8 @@ def _get_cached_sanitized_epub(filepath: str) -> str:
     """Returns path to a disk-cached EPUB with Foliate-style reader CSS."""
     abs_path = os.path.abspath(filepath)
     st = os.stat(abs_path)
-    # 'v9' invalidates output generated before MuPDF namespace-selector cleanup.
-    cache_key = f"v9:{abs_path}:{st.st_mtime_ns}:{st.st_size}"
+    # 'v10' invalidates output generated before the final CSS compatibility fix.
+    cache_key = f"v10:{abs_path}:{st.st_mtime_ns}:{st.st_size}"
     digest = hashlib.sha1(cache_key.encode("utf-8")).hexdigest()[:20]
     cached_epub = SANITIZED_EPUB_CACHE_DIR / f"{digest}.epub"
 
