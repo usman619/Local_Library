@@ -91,16 +91,18 @@ class PageRenderer:
         arr = np.frombuffer(samples, dtype=np.uint8).reshape((height, stride))
         rgb = arr[:, : width * 3].reshape((height, width, 3))
 
+        # Integer luminance (0..255), then a 256-entry colour table. This replaces
+        # several full-size float32 passes with one uint16 pass and one table lookup.
         lum = (
-            0.299 * rgb[:, :, 0].astype(np.float32)
-            + 0.587 * rgb[:, :, 1].astype(np.float32)
-            + 0.114 * rgb[:, :, 2].astype(np.float32)
-        ) / 255.0
-
-        out = np.empty_like(rgb)
+            (rgb[:, :, 0].astype(np.uint16) * 77)
+            + (rgb[:, :, 1].astype(np.uint16) * 150)
+            + (rgb[:, :, 2].astype(np.uint16) * 29)
+        ) >> 8
+        t = np.arange(256, dtype=np.float32) / 255.0
+        table = np.empty((256, 3), dtype=np.uint8)
         for c in range(3):
-            val = fg_rgb[c] + lum * (bg_rgb[c] - fg_rgb[c])
-            out[:, :, c] = np.clip(val, 0, 255).astype(np.uint8)
+            table[:, c] = np.clip(fg_rgb[c] + t * (bg_rgb[c] - fg_rgb[c]), 0, 255).astype(np.uint8)
+        out = table[lum]
 
         contiguous = np.ascontiguousarray(out)
         qimg = QImage(

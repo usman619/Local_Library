@@ -376,6 +376,24 @@ class ReaderView(QWidget):
         self.shortcut_reset_zoom = QShortcut(QKeySequence("Ctrl+0"), self)
         self.shortcut_reset_zoom.activated.connect(self.reset_zoom)
 
+        self.shortcut_zoom_in = QShortcut(QKeySequence("Ctrl++"), self)
+        self.shortcut_zoom_in.setAutoRepeat(False)
+        self.shortcut_zoom_in.activated.connect(self.zoom_in)
+
+        self.shortcut_zoom_in_equal = QShortcut(QKeySequence("Ctrl+="), self)
+        self.shortcut_zoom_in_equal.setAutoRepeat(False)
+        self.shortcut_zoom_in_equal.activated.connect(self.zoom_in)
+
+        self.shortcut_zoom_in_shift_equal = QShortcut(
+            QKeySequence("Ctrl+Shift+="), self
+        )
+        self.shortcut_zoom_in_shift_equal.setAutoRepeat(False)
+        self.shortcut_zoom_in_shift_equal.activated.connect(self.zoom_in)
+
+        self.shortcut_zoom_out = QShortcut(QKeySequence("Ctrl+-"), self)
+        self.shortcut_zoom_out.setAutoRepeat(False)
+        self.shortcut_zoom_out.activated.connect(self.zoom_out)
+
     def eventFilter(self, obj, event):
         search_input = getattr(self, "search_input", None)
         toc_tree = getattr(self, "toc_tree", None)

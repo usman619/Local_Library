@@ -1,4 +1,5 @@
 import os
+import math
 import bisect
 import webbrowser
 import pymupdf
@@ -206,7 +207,28 @@ class DocumentCanvasView(QAbstractScrollArea):
         self._zoom_anim.finished.connect(self._finish_zoom_animation)
         self._zoom_anchor = QPointF()
         self._zooming = False
-        self._zoom_start = (1.25, 0, 0)
+
+        # Page-relative anchor captured at the start of a zoom gesture and reused
+        # for every step, so rounding never accumulates into drift.
+        self._anchor_state = None
+        self._anchor_state_pos = QPointF()
+        # True from the first zoom step until sharp re-rendering has finished.
+        # While set, paintEvent never renders at the new zoom synchronously.
+        self._zoom_settling = False
+
+        # Coalesce high-rate wheel / pinch events to at most one zoom per frame.
+        self._pending_zoom_factor = 1.0
+        self._pending_zoom_anchor = QPointF()
+        self._zoom_flush = QTimer(self)
+        self._zoom_flush.setSingleShot(True)
+        self._zoom_flush.setInterval(16)
+        self._zoom_flush.timeout.connect(self._flush_zoom)
+
+        # Re-renders stale pages one per event-loop tick after a zoom settles.
+        self._sharp_chain = QTimer(self)
+        self._sharp_chain.setSingleShot(True)
+        self._sharp_chain.setInterval(0)
+        self._sharp_chain.timeout.connect(self._rerender_sharp_step)
 
         # Detect if the user drags or clicks the scrollbar directly
         self.verticalScrollBar().sliderMoved.connect(self._on_user_manual_scroll)
@@ -263,11 +285,8 @@ class DocumentCanvasView(QAbstractScrollArea):
             self._zoom_anim.stop()
         self._zoom_anchor = anchor_pos
         self._zooming = True
-        self._zoom_start = (
-            self.zoom,
-            self.verticalScrollBar().value(),
-            self.horizontalScrollBar().value(),
-        )
+        self._anchor_state = self._capture_anchor(anchor_pos)
+        self._anchor_state_pos = QPointF(anchor_pos)
         self._zoom_anim.setStartValue(self.zoom)
         self._zoom_anim.setEndValue(target_zoom)
         self._zoom_anim.start()
@@ -905,6 +924,7 @@ class DocumentCanvasView(QAbstractScrollArea):
 
     def _on_scroll(self, _value: int):
         self.selection_popup.hide()
+        self._anchor_state = None
         if self.view_mode == "continuous" and self.page_y and self.doc:
             center_y = self.verticalScrollBar().value() + (self.viewport().height() // 2)
             idx = max(0, bisect.bisect_right(self.page_y, center_y) - 1)
@@ -926,6 +946,8 @@ class DocumentCanvasView(QAbstractScrollArea):
     def _prefetch_nearby_pages(self):
         """Pre-renders 2 pages ahead and 1 page behind during scroll idle for butter-smooth EPUB reading."""
         if not self.doc or not self.page_y or self.view_mode != "continuous":
+            return
+        if self._zoom_settling or self._zooming:
             return
         vis = self._visible_pages_list()
         if not vis:
@@ -975,6 +997,11 @@ class DocumentCanvasView(QAbstractScrollArea):
 
             cached = self._pixmap_cache.get(i)
             if cached is None:
+                if self._zooming or self._zoom_settling:
+                    painter.save()
+                    painter.fillRect(target_rect, QColor("#181825"))
+                    painter.restore()
+                    continue
                 pix = self._render_page_pixmap(i, dpr)
                 self._pixmap_cache[i] = (self.zoom, pix)
             else:
@@ -1063,6 +1090,24 @@ class DocumentCanvasView(QAbstractScrollArea):
         self.page_changed.emit(self.current_page, len(self.doc), self.zoom)
         self.viewport().update()
 
+    # ------------------------------------------------------------------
+    # Zoom: anchoring, coalescing and sharp re-rendering
+    # ------------------------------------------------------------------
+    def queue_zoom_factor(self, factor: float, anchor_pos: QPointF):
+        """Entry point for wheel / pinch: apply now, then coalesce for one frame."""
+        if not self._zoom_flush.isActive():
+            self.apply_zoom_factor(factor, anchor_pos)
+            self._zoom_flush.start()
+        else:
+            self._pending_zoom_factor *= factor
+            self._pending_zoom_anchor = QPointF(anchor_pos)
+
+    def _flush_zoom(self):
+        factor, self._pending_zoom_factor = self._pending_zoom_factor, 1.0
+        if abs(factor - 1.0) > 1e-4:
+            self.apply_zoom_factor(factor, self._pending_zoom_anchor)
+            self._zoom_flush.start()
+
     def apply_zoom_factor(self, factor: float, anchor_pos: QPointF):
         if not self.doc or not self.page_y:
             return
@@ -1072,54 +1117,145 @@ class DocumentCanvasView(QAbstractScrollArea):
             self._zooming = False
         old_zoom = self.zoom
         new_zoom = max(0.5, min(3.5, self.zoom * factor))
-        if abs(new_zoom - old_zoom) < 1e-3:
+        if abs(new_zoom - old_zoom) < 1e-4:
             return
-        self._apply_zoom_at_anchor(new_zoom, anchor_pos, emit_signal=True)
+
+        # Reuse the anchor of the running gesture unless the cursor moved or the
+        # user scrolled; recapturing every event would accumulate rounding error.
+        moved = (
+            self._anchor_state is None
+            or abs(anchor_pos.x() - self._anchor_state_pos.x()) > 2.0
+            or abs(anchor_pos.y() - self._anchor_state_pos.y()) > 2.0
+        )
+        if moved:
+            self._anchor_state = self._capture_anchor(anchor_pos)
+            self._anchor_state_pos = QPointF(anchor_pos)
+        self._apply_zoom_at_anchor(new_zoom, self._anchor_state_pos, emit_signal=True)
+
+    def _capture_anchor(self, anchor_pos: QPointF):
+        """
+        Describe the point under anchor_pos in *page-relative* terms:
+        (page_idx, frac_x, extra_x_px, frac_y, extra_y_px).
+        Page sizes scale with zoom but gaps/margins do not, so proportional math
+        over whole-document coordinates (the old approach) drifts further the
+        deeper into the book you are. Fractions of one page do not.
+        """
+        pages = self._visible_pages_list()
+        if not pages:
+            return None
+        ax, ay = anchor_pos.x(), anchor_pos.y()
+
+        best, best_d = None, None
+        for i in pages:
+            r = self._page_target_rect(i)
+            dx = max(r.left() - ax, 0.0, ax - r.right())
+            dy = max(r.top() - ay, 0.0, ay - r.bottom())
+            d = dx * dx + dy * dy
+            if best_d is None or d < best_d:
+                best, best_d = (i, r), d
+        idx, r = best
+
+        def split(offset: float, size: float):
+            frac = min(max(offset / max(1.0, size), 0.0), 1.0)
+            return frac, offset - frac * size  # remainder = fixed-pixel margin/gap
+
+        fx, ex = split(ax - r.x(), r.width())
+        fy, ey = split(ay - r.y(), r.height())
+        return (idx, fx, ex, fy, ey)
+
+    def _restore_anchor(self, state, anchor_pos: QPointF):
+        """Scroll so the captured page-relative point sits under anchor_pos again."""
+        if state is None:
+            return
+        idx, fx, ex, fy, ey = state
+        vbar, hbar = self.verticalScrollBar(), self.horizontalScrollBar()
+        r = self._page_target_rect(idx)
+
+        want_y = r.y() + fy * r.height() + ey
+        vbar.setValue(round(vbar.value() + (want_y - anchor_pos.y())))
+
+        # A page narrower than the viewport is centred and ignores the h-scroll.
+        if r.width() >= self.viewport().width() or self.view_mode != "continuous":
+            want_x = r.x() + fx * r.width() + ex
+            hbar.setValue(round(hbar.value() + (want_x - anchor_pos.x())))
 
     def _apply_zoom_at_anchor(
         self, new_zoom: float, anchor_pos: QPointF, emit_signal: bool
     ):
         old_zoom = self.zoom
         new_zoom = max(0.5, min(3.5, float(new_zoom)))
-        if abs(new_zoom - old_zoom) < 1e-3:
+        if abs(new_zoom - old_zoom) < 1e-4:
             return
-        if self._zooming:
-            start_zoom, start_scroll_y, start_scroll_x = self._zoom_start
-            ratio = new_zoom / start_zoom
-        else:
-            start_zoom = old_zoom
-            start_scroll_y = self.verticalScrollBar().value()
-            start_scroll_x = self.horizontalScrollBar().value()
-            ratio = new_zoom / start_zoom
-        self.zoom = new_zoom
-        self.selection_popup.hide()
 
-        ay = anchor_pos.y()
-        ax = anchor_pos.x()
+        state = self._anchor_state
+        if state is None:
+            state = self._capture_anchor(anchor_pos)
+            self._anchor_state = state
+            self._anchor_state_pos = QPointF(anchor_pos)
+
+        self.zoom = new_zoom
+        self._zoom_settling = True
+        self._sharp_chain.stop()
+        self.selection_popup.hide()
 
         with QSignalBlocker(self.verticalScrollBar()), QSignalBlocker(
             self.horizontalScrollBar()
         ):
             self._recalculate_layout()
+            self._restore_anchor(state, anchor_pos)
 
-            content_y = start_scroll_y + ay - self.MARGIN_Y
-            content_x = start_scroll_x + ax - self.MARGIN_X
-            new_scroll_y = (content_y * ratio) + self.MARGIN_Y - ay
-            new_scroll_x = (content_x * ratio) + self.MARGIN_X - ax
-            self.verticalScrollBar().setValue(round(new_scroll_y))
-            self.horizontalScrollBar().setValue(round(new_scroll_x))
+        # Signals were blocked, so refresh the current page ourselves.
+        if self.view_mode == "continuous" and self.page_y:
+            center_y = self.verticalScrollBar().value() + self.viewport().height() // 2
+            self.current_page = max(0, bisect.bisect_right(self.page_y, center_y) - 1)
 
         if emit_signal:
             self.page_changed.emit(self.current_page, len(self.doc), self.zoom)
         self.viewport().update()
-        if emit_signal:
-            self._sharp_timer.start()
+        self._sharp_timer.start()
 
     def _rerender_sharp(self):
-        for page_idx, (cached_zoom, _) in list(self._pixmap_cache.items()):
-            if abs(cached_zoom - self.zoom) > 1e-3:
-                del self._pixmap_cache[page_idx]
+        """Gesture is over: keep the old pixmaps on screen and swap them one by one."""
+        self._anchor_state = None
+        # Drop stale pixmaps that are off-screen so they can't reappear blurry later.
+        visible = set(self._visible_pages_list())
+        for p, (z, _pix) in list(self._pixmap_cache.items()):
+            if p not in visible and abs(z - self.zoom) > 1e-3:
+                del self._pixmap_cache[p]
+        self._sharp_chain.start()
+
+    def _rerender_sharp_step(self):
+        if not self.doc or not self.page_y:
+            self._zoom_settling = False
+            return
+        if self._sharp_timer.isActive() or self._zooming:
+            return  # user is zooming again; wait for the next settle
+
+        vis = self._visible_pages_list()
+        stale = []
+        for p in vis:
+            cached = self._pixmap_cache.get(p)
+            if cached is None or abs(cached[0] - self.zoom) > 1e-3:
+                stale.append(p)
+
+        if not stale:
+            self._zoom_settling = False
+            self.viewport().update()
+            return
+
+        # Pixmap closest to the viewport centre first.
+        vp_mid = self.viewport().height() / 2
+        stale.sort(key=lambda p: abs(self._page_target_rect(p).center().y() - vp_mid))
+        p = stale[0]
+
+        screen = QApplication.primaryScreen()
+        dpr = min(1.25, max(1.0, screen.devicePixelRatio() if screen else 1.0))
+        self._pixmap_cache[p] = (self.zoom, self._render_page_pixmap(p, dpr))
         self.viewport().update()
+        if len(stale) > 1:
+            self._sharp_chain.start()
+        else:
+            self._zoom_settling = False
 
     def viewportEvent(self, event: QEvent) -> bool:
         etype = event.type()
@@ -1127,8 +1263,11 @@ class DocumentCanvasView(QAbstractScrollArea):
             if event.gestureType() == Qt.ZoomNativeGesture:
                 factor = 1.0 + float(event.value())
                 if 0.5 < factor < 2.0 and abs(factor - 1.0) > 1e-4:
-                    pos = self.viewport().mapFromGlobal(QCursor.pos())
-                    self.apply_zoom_factor(factor, QPointF(pos))
+                    try:
+                        pos = QPointF(event.position())
+                    except Exception:
+                        pos = QPointF(self.viewport().mapFromGlobal(QCursor.pos()))
+                    self.queue_zoom_factor(factor, pos)
                 event.accept()
                 return True
         elif etype == QEvent.Gesture and isinstance(event, QGestureEvent):
@@ -1138,7 +1277,7 @@ class DocumentCanvasView(QAbstractScrollArea):
                     factor = float(pinch.scaleFactor())
                     if 0.5 < factor < 2.0 and abs(factor - 1.0) > 1e-4:
                         pos = self.viewport().mapFromGlobal(QCursor.pos())
-                        self.apply_zoom_factor(factor, QPointF(pos))
+                        self.queue_zoom_factor(factor, QPointF(pos))
                 event.accept()
                 return True
         return super().viewportEvent(event)
@@ -1148,14 +1287,14 @@ class DocumentCanvasView(QAbstractScrollArea):
             pixel_dy = event.pixelDelta().y()
             angle_dy = event.angleDelta().y()
             if pixel_dy != 0:
-                factor = 1.0 + (pixel_dy * 0.004)
+                factor = math.exp(pixel_dy * 0.004)
             elif angle_dy != 0:
-                factor = 1.0 + (angle_dy / 1200.0)
+                factor = math.exp(angle_dy * 0.001)   # one notch (120) ~ +/-12.7%
             else:
                 factor = 1.0
             factor = max(0.80, min(1.25, factor))
             if abs(factor - 1.0) > 1e-4:
-                self.apply_zoom_factor(factor, event.position())
+                self.queue_zoom_factor(factor, QPointF(event.position()))
             event.accept()
             return
 

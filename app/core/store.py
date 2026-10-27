@@ -15,6 +15,7 @@ from app.config import (
     DEFAULT_EPUB_FONTSIZE,
     TTS_VOICES,
 )
+from app.core.epub_loader import open_clean_document
 
 SUPPORTED_EXTENSIONS = {".pdf", ".epub", ".fb2", ".mobi", ".cbz", ".xps", ".txt"}
 
