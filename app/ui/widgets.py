@@ -129,6 +129,8 @@ class DocumentCanvasView(QAbstractScrollArea):
         self.book_highlights: list[dict] = []
         self.active_tts_page: int | None = None
         self.active_tts_sentence: str | None = None
+        self.active_tts_text: str | None = None
+        self.active_tts_bbox: tuple | None = None
 
         self.base_sizes: list[tuple[float, float]] = []
         self.page_y: list[int] = []
@@ -455,7 +457,7 @@ class DocumentCanvasView(QAbstractScrollArea):
             if r and r.x0 <= pdf_pt.x() <= r.x1 and r.y0 <= pdf_pt.y() <= r.y1:
                 # 1. Internal page jump destination
                 target_page = link.get("page")
-                if target_is_int := isinstance(target_page, int) and 0 <= target_page < len(self.doc):
+                if isinstance(target_page, int) and 0 <= target_page < len(self.doc):
                     self.jump_to_page(target_page)
                     return True
                 # 2. URI / Web link
@@ -846,8 +848,11 @@ class DocumentCanvasView(QAbstractScrollArea):
 
         scroll_y = self.verticalScrollBar().value()
         vp_h = self.viewport().height()
-        top_y = scroll_y - 400
-        bot_y = scroll_y + vp_h + 400
+        # Keep synchronous paint work bounded; nearby pages are rendered by the
+        # incremental prefetch timer instead of blocking the paint event.
+        buffer_y = max(120, min(220, vp_h // 3))
+        top_y = scroll_y - buffer_y
+        bot_y = scroll_y + vp_h + buffer_y
 
         start_idx = max(0, bisect.bisect_right(self.page_y, top_y) - 1)
         end_idx = min(len(self.page_y) - 1, bisect.bisect_right(self.page_y, bot_y))
@@ -882,11 +887,19 @@ class DocumentCanvasView(QAbstractScrollArea):
         screen = QApplication.primaryScreen()
         dpr = min(1.25, max(1.0, screen.devicePixelRatio() if screen else 1.0))
 
-        candidates = [vis[-1] + 1, vis[-1] + 2, vis[0] - 1]
+        candidates = [
+            vis[-1] + 1,
+            vis[-1] + 2,
+            vis[-1] + 3,
+            vis[0] - 1,
+            vis[0] - 2,
+        ]
         for p in candidates:
             if 0 <= p < len(self.doc) and p not in self._pixmap_cache:
                 self._pixmap_cache[p] = (self.zoom, self._render_page_pixmap(p, dpr))
-                break  # Pre-render 1 page per idle tick so UI event loop stays 100% responsive
+                # Render one page per idle tick so the UI event loop stays responsive.
+                self._prefetch_timer.start()
+                break
 
     def paintEvent(self, event):
         painter = QPainter(self.viewport())
@@ -905,8 +918,7 @@ class DocumentCanvasView(QAbstractScrollArea):
 
         min_vis, max_vis = min(visible_pages), max(visible_pages)
         for cached_page in list(self._pixmap_cache.keys()):
-            # <--- Changed from ±2 to ±6 so pre-fetched pages aren't immediately evicted
-            if cached_page < min_vis - 6 or cached_page > max_vis + 6:
+            if cached_page < min_vis - 4 or cached_page > max_vis + 4:
                 del self._pixmap_cache[cached_page]
 
         screen = QApplication.primaryScreen()
@@ -983,6 +995,7 @@ class DocumentCanvasView(QAbstractScrollArea):
 
     def invalidate_all(self):
         self._pixmap_cache.clear()
+        self._recalculate_layout()
         self.viewport().update()
 
     def jump_to_page(self, page_index: int):
@@ -1174,29 +1187,6 @@ class DocumentCanvasView(QAbstractScrollArea):
         distance = abs(delta_y)
         duration = min(480, max(240, int(distance * 0.65)))
         self.smooth_scroll_to_y(target_scroll, duration_ms=duration)
-
-    def _request_lookup_from_selection(self):
-        if self._sel_text.strip():
-            txt = self._sel_text.strip()
-            self.selection_popup.hide()
-            self.lookup_requested.emit(txt)
-
-    def _prefetch_nearby_pages(self):
-        """Pre-renders 2 pages ahead and 1 page behind during scroll idle for butter-smooth EPUB reading."""
-        if not self.doc or not self.page_y or self.view_mode != "continuous":
-            return
-        vis = self._visible_pages_list()
-        if not vis:
-            return
-        screen = QApplication.primaryScreen()
-        dpr = min(1.25, max(1.0, screen.devicePixelRatio() if screen else 1.0))
-
-        candidates = [vis[-1] + 1, vis[-1] + 2, vis[0] - 1]
-        for p in candidates:
-            if 0 <= p < len(self.doc) and p not in self._pixmap_cache:
-              self._pixmap_cache[p] = (self.zoom, self._render_page_pixmap(p, dpr))
-              break  # Pre-render 1 page per idle tick so UI event loop stays 100% responsive
-
 
 class BookCardWidget(QFrame):
     """Clickable library card showing cover thumbnail, format, folder badge, progress bar, and remove button."""
@@ -1398,34 +1388,3 @@ class BookCardWidget(QFrame):
                 return
             self.clicked.emit(self.book_path)
         super().mousePressEvent(event)
-
-    @staticmethod
-    def _truncate_title(title: str, max_words: int = 6, max_chars: int = 40) -> str:
-        cleaned = " ".join(title.replace("_", " ").split())
-        words = cleaned.split(" ")
-        truncated = False
-        if len(words) > max_words:
-            cleaned = " ".join(words[:max_words])
-            truncated = True
-        if len(cleaned) > max_chars:
-            cleaned = cleaned[: max_chars - 3].rstrip()
-            truncated = True
-        return f"{cleaned}..." if truncated else cleaned
-
-    def mousePressEvent(self, event):
-        if event.button() == Qt.LeftButton:
-            self.clicked.emit(self.book_path)
-
-    def contextMenuEvent(self, event):
-        menu = QMenu(self)
-        menu.setStyleSheet("""
-            QMenu {
-                background-color: #1E1E2E; color: #CDD6F4;
-                border: 1px solid #45475A; border-radius: 6px; padding: 4px;
-            }
-            QMenu::item { padding: 6px 18px; border-radius: 4px; }
-            QMenu::item:selected { background-color: #F38BA8; color: #11111B; font-weight: bold; }
-        """)
-        act_rem = menu.addAction("Remove from Library")
-        act_rem.triggered.connect(lambda: self.remove_requested.emit(self.book_path))
-        menu.exec(event.globalPos())

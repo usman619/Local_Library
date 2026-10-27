@@ -22,86 +22,23 @@ EPUB_PAGE_HEIGHT = 820
 DEFAULT_EPUB_FONTSIZE = 12.5
 
 EPUB_READER_CSS = """
-@page {
-    margin: 38pt 36pt 38pt 36pt;
-}
-html, body {
-    margin: 0 !important;
-    padding: 0 !important;
-    line-height: 1.6 !important;
-}
-p, dd, dt, blockquote {
-    display: block !important;
-    line-height: 1.6 !important;
-    margin-top: 0.5em !important;
-    margin-bottom: 0.6em !important;
-    text-align: justify;
-}
-li {
-    line-height: 1.55 !important;
-    margin-top: 0.25em !important;
-    margin-bottom: 0.25em !important;
-}
-h1, h2, h3, h4, h5, h6 {
-    display: block !important;
-    line-height: 1.3 !important;
-    margin-top: 1.2em !important;
-    margin-bottom: 0.5em !important;
-    page-break-after: avoid;
-    page-break-inside: avoid;
-}
-div, section, article, main, aside, header, footer, figure, figcaption {
-    display: block !important;
-    margin-top: 0.4em;
-    margin-bottom: 0.4em;
-}
-table {
-    display: table !important;
-    width: 100% !important;
-    border-collapse: collapse !important;
-    margin-top: 12pt !important;
-    margin-bottom: 12pt !important;
-    page-break-inside: avoid;
-}
-thead {
-    display: table-header-group !important;
-}
-tbody {
-    display: table-row-group !important;
-}
-tr {
-    display: table-row !important;
-    page-break-inside: avoid;
-}
-th, td {
-    display: table-cell !important;
-    padding: 5pt 7pt !important;
-    border: 1pt solid #6C7086 !important;
+p, li, blockquote, dd {
     line-height: 1.4 !important;
-    text-align: left !important;
-    vertical-align: top !important;
+    text-align: justify;
+    hyphens: manual;
+    -webkit-hyphens: manual;
+    widows: 2;
 }
-th {
-    font-weight: bold !important;
-}
-pre, code.block {
-    display: block !important;
-    margin-top: 8pt !important;
-    margin-bottom: 8pt !important;
-    padding: 8pt !important;
-    border: 1pt solid #585B70 !important;
+[align="left"] { text-align: left; }
+[align="right"] { text-align: right; }
+[align="center"] { text-align: center; }
+[align="justify"] { text-align: justify; }
+pre {
     white-space: pre-wrap !important;
-    word-wrap: break-word !important;
-    line-height: 1.35 !important;
-    font-size: 0.88em !important;
 }
 img {
-    display: block !important;
-    margin-top: 8pt !important;
-    margin-bottom: 8pt !important;
-    margin-left: auto !important;
-    margin-right: auto !important;
-    page-break-inside: avoid;
+    max-width: 100% !important;
+    height: auto !important;
 }
 """
 

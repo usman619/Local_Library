@@ -8,9 +8,6 @@ from pathlib import Path
 from datetime import datetime
 import pymupdf
 
-from app.config import LIBRARY_DB_FILE, COVERS_CACHE_DIR, DEFAULT_EPUB_FONTSIZE
-from app.core.epub_loader import open_clean_document
-
 from app.config import (
     LIBRARY_DB_FILE,
     SETTINGS_FILE,
@@ -299,7 +296,12 @@ class LibraryStore:
 
         # Infer from existing books in the library
         parent_counts: dict[str, int] = {}
-        for b_path, b_info in self.books.items():
+        for _book_id, b_info in self.books.items():
+            if not isinstance(b_info, dict):
+                continue
+            b_path = b_info.get("path") or b_info.get("filepath") or ""
+            if not b_path or not os.path.exists(b_path):
+                continue
             p = Path(b_path).resolve().parent
             # If the book is already inside a known category subfolder, step up one level
             cat = b_info.get("category", "").strip()
@@ -352,7 +354,8 @@ class LibraryStore:
 
     def create_folder(self, folder_name: str) -> tuple[bool, str]:
         """Creates a new virtual category/folder in settings.json."""
-        clean_name = " ".join(folder_name.split()).strip()
+        clean_name = self._sanitize_folder_name(" ".join(folder_name.split()))
+        clean_name = " ".join(clean_name.split()).strip()
         if not clean_name:
             return False, "Category name cannot be empty."
 
@@ -417,7 +420,12 @@ class LibraryStore:
         if not book_entry or key is None:
             return False, "Book not found in library database."
 
-        clean_folder = " ".join(folder_name.split()).strip() if folder_name else ""
+        clean_folder = (
+            self._sanitize_folder_name(" ".join(folder_name.split()))
+            if folder_name
+            else ""
+        )
+        clean_folder = " ".join(clean_folder.split()).strip()
 
         if clean_folder:
             folders = self.get_folders()
@@ -432,7 +440,8 @@ class LibraryStore:
 
     def rename_folder(self, old_name: str, new_name: str) -> tuple[bool, str]:
         """Renames a virtual category across settings.json and all associated books in library.json."""
-        clean_new = " ".join(new_name.split()).strip()
+        clean_new = self._sanitize_folder_name(" ".join(new_name.split()))
+        clean_new = " ".join(clean_new.split()).strip()
         if not clean_new:
             return False, "New category name cannot be empty."
         if old_name == clean_new:

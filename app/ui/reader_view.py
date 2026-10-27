@@ -84,6 +84,10 @@ class ReaderView(QWidget):
         self.search_input = QLineEdit()
         self.search_input.setPlaceholderText("Find in document (Enter = Next, Shift+Enter = Previous, Esc = Close)...")
         self.search_input.setMinimumWidth(320)
+        self._search_timer = QTimer(self)
+        self._search_timer.setSingleShot(True)
+        self._search_timer.setInterval(300)
+        self._search_timer.timeout.connect(self._execute_search)
         self.search_input.textChanged.connect(lambda _: self._search_timer.start())
         self.search_input.installEventFilter(self)
         sb_layout.addWidget(self.search_input)
@@ -348,11 +352,10 @@ class ReaderView(QWidget):
         """Handles text selection events on the document canvas."""
         if page_idx is not None and selected_text and selected_text.strip():
             cleaned = " ".join(selected_text.split()).strip()
-            if cleaned and hasattr(self, "selection_popup") and self.selection_popup:
-                self.selection_popup.show_selection_bar(page_idx, cleaned, global_pos)
+            if cleaned and self.canvas.selection_popup:
+                self.canvas.selection_popup.show_selection_bar(page_idx, cleaned, global_pos)
         else:
-            if hasattr(self, "selection_popup") and self.selection_popup:
-                self.selection_popup.hide()
+            self.canvas.selection_popup.hide()
     
     def _sync_toc_selection(self, page_idx: int):
         """Synchronizes the Table of Contents tree selection with the active page index."""
@@ -527,12 +530,14 @@ class ReaderView(QWidget):
         self.canvas.set_document(self.doc, self.current_book.get("highlights", []))
         self._reading_timer.start()
 
-        saved_page = min(self.current_book.get("current_page", 0), len(self.doc) - 1)
+        saved_page = min(
+            max(0, int(self.current_book.get("current_page", 0))),
+            len(self.doc) - 1,
+        )
         QTimer.singleShot(40, lambda: self.jump_to_page(saved_page))
 
         saved_zoom = float(self.current_book.get("zoom", 1.25))
         self.canvas.set_zoom(saved_zoom)
-        saved_page = int(self.current_book.get("current_page", 0))
         self.canvas.scroll_to_page(saved_page)
         self._sync_toc_selection(saved_page)
         self._emit_status()
@@ -541,6 +546,7 @@ class ReaderView(QWidget):
         """Closes the active document, stops TTS, and clears reader state when returning Home."""
         self.stop_tts()
         self.close_search_bar()
+        self._reading_timer.stop()
         if self.doc:
             try:
                 self.doc.close()
@@ -599,7 +605,12 @@ class ReaderView(QWidget):
         zoom_pct = int(round(self.canvas.zoom * 100))
         self.status_updated.emit(f"Page {cur} / {total} ({pct}%)  •  Zoom {zoom_pct}%")
 
-    def _on_canvas_page_changed(self, page_idx: int):
+    def _on_canvas_page_changed(
+        self,
+        page_idx: int,
+        _total_pages: int | None = None,
+        _zoom: float | None = None,
+    ):
         if not self.doc or not self.current_book:
             return
         self.current_book["current_page"] = page_idx

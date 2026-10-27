@@ -389,4 +389,8 @@ class LocalLibraryWindow(QMainWindow):
             else "Book"
         )
         self.setWindowTitle(f"{book_title}")
-        self.stack.setCurrentIndex(1)
+
+    def closeEvent(self, event):
+        self.reader_view.close_book()
+        self.store.save()
+        event.accept()

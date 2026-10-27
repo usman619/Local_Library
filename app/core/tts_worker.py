@@ -599,7 +599,7 @@ class NeuralTTSWorker(QThread):
                     idx += 1
 
         finally:
-            executor.shutdown(wait=False, cancel_futures=True)
+            executor.shutdown(wait=True, cancel_futures=True)
             shutil.rmtree(self._temp_dir, ignore_errors=True)
             if not self._stop_requested:
                 self.playback_state_changed.emit("stopped")

@@ -1,5 +1,4 @@
 import re
-import ssl
 import json
 import shutil
 import subprocess
@@ -59,12 +58,7 @@ class LookupWorker(QThread):
         try:
             with urllib.request.urlopen(req, timeout=timeout) as resp:
                 return json.loads(resp.read().decode("utf-8", errors="ignore"))
-        except urllib.error.URLError as e:
-            # Fix for Anaconda on Linux where CA certificates path may not be linked
-            if "CERTIFICATE_VERIFY_FAILED" in str(e):
-                ctx = ssl._create_unverified_context()
-                with urllib.request.urlopen(req, timeout=timeout, context=ctx) as resp:
-                    return json.loads(resp.read().decode("utf-8", errors="ignore"))
+        except urllib.error.URLError:
             raise
 
     def _fetch_dictionary(self, word: str) -> str:
