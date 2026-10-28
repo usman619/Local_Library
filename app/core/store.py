@@ -8,6 +8,7 @@ from pathlib import Path
 from datetime import datetime
 import pymupdf
 
+from app.core.epub_loader import open_clean_document
 from app.config import (
     LIBRARY_DB_FILE,
     SETTINGS_FILE,
@@ -15,7 +16,6 @@ from app.config import (
     DEFAULT_EPUB_FONTSIZE,
     TTS_VOICES,
 )
-from app.core.epub_loader import open_clean_document
 
 SUPPORTED_EXTENSIONS = {".pdf", ".epub", ".fb2", ".mobi", ".cbz", ".xps", ".txt"}
 
@@ -33,13 +33,30 @@ class LibraryStore:
     def _load(self) -> dict:
         if self.db_file.exists():
             try:
-                return json.loads(self.db_file.read_text(encoding="utf-8"))
+                data = json.loads(self.db_file.read_text(encoding="utf-8"))
+                return data if isinstance(data, dict) else {}
             except Exception:
+                # Don't let the next save() overwrite an unreadable library:
+                # keep a copy so the user's highlights and notes can be recovered.
+                try:
+                    shutil.copy2(self.db_file, self.db_file.with_suffix(".json.corrupt"))
+                except Exception:
+                    pass
                 return {}
         return {}
 
+    @staticmethod
+    def _atomic_write_text(path: Path, text: str):
+        """Write to a temp file then rename, so a crash can't leave a half-written JSON."""
+        tmp = path.with_name(path.name + ".tmp")
+        tmp.write_text(text, encoding="utf-8")
+        os.replace(tmp, path)
+
     def save(self):
-        self.db_file.write_text(json.dumps(self.books, indent=2), encoding="utf-8")
+        try:
+            self._atomic_write_text(self.db_file, json.dumps(self.books, indent=2))
+        except OSError:
+            pass
 
     def _load_settings(self) -> dict:
         defaults = {
@@ -64,8 +81,8 @@ class LibraryStore:
     def save_settings(self, **kwargs):
         self.settings.update(kwargs)
         try:
-            self.settings_file.write_text(
-                json.dumps(self.settings, indent=2), encoding="utf-8"
+            self._atomic_write_text(
+                self.settings_file, json.dumps(self.settings, indent=2)
             )
         except Exception:
             pass
@@ -153,7 +170,10 @@ class LibraryStore:
                 pass
 
     def add_or_update_book(
-        self, filepath: str, open_doc: pymupdf.Document | None = None
+        self,
+        filepath: str,
+        open_doc: pymupdf.Document | None = None,
+        autosave: bool = True,
     ) -> dict | None:
         filepath = os.path.abspath(filepath)
         if not os.path.exists(filepath):
@@ -174,23 +194,25 @@ class LibraryStore:
             except Exception:
                 return None
 
-        meta = doc.metadata or {}
-        title = (meta.get("title") or "").strip() or Path(filepath).stem
-        author = (meta.get("author") or "").strip() or "Unknown Author"
-        publisher = (meta.get("producer") or meta.get("creator") or "").strip()
-        total_pages = len(doc)
+        try:
+            meta = doc.metadata or {}
+            title = (meta.get("title") or "").strip() or Path(filepath).stem
+            author = (meta.get("author") or "").strip() or "Unknown Author"
+            publisher = (meta.get("producer") or meta.get("creator") or "").strip()
+            total_pages = len(doc)
 
-        # Regenerate cover if missing or if an EPUB hasn't been upgraded to v2 native cover extraction
-        needs_cover_upgrade = (
-            Path(filepath).suffix.lower() == ".epub" and not existing.get("cover_v2", False)
-        )
-        if (not cover_path.exists() or needs_cover_upgrade) and total_pages > 0:
-            self._generate_cover(filepath, doc, cover_path)
-
-        if should_close:
-            doc.close()
+            # Regenerate cover if missing or if an EPUB hasn't been upgraded to v2 native cover extraction
+            needs_cover_upgrade = (
+                Path(filepath).suffix.lower() == ".epub" and not existing.get("cover_v2", False)
+            )
+            if (not cover_path.exists() or needs_cover_upgrade) and total_pages > 0:
+                self._generate_cover(filepath, doc, cover_path)
+        finally:
+            if should_close:
+                doc.close()
 
         record = {
+            **existing,  # keep fields not rebuilt below (e.g. the saved "zoom")
             "id": bid,
             "path": filepath,
             "title": title,
@@ -222,7 +244,8 @@ class LibraryStore:
             ),
         }
         self.books[bid] = record
-        self.save()
+        if autosave:
+            self.save()
         return record
 
     def refresh_epub_covers_once(self):
@@ -291,7 +314,7 @@ class LibraryStore:
         If not explicitly set by the user, infers the common parent folder of existing books
         or falls back to ~/Documents/LocalLibrary.
         """
-        saved_root = self.settings.get("library_root", "").strip()
+        saved_root = (self.settings.get("library_root") or "").strip()
         if saved_root and os.path.isdir(saved_root):
             return Path(saved_root).resolve()
 
@@ -398,17 +421,29 @@ class LibraryStore:
         if norm_id in self.books:
             return norm_id, self.books[norm_id]
 
-        target_name = os.path.basename(identifier)
+        bid = self.book_id(identifier)
+        if bid in self.books:
+            return bid, self.books[bid]
+
         for k, b_info in self.books.items():
             if not isinstance(b_info, dict):
                 continue
             b_path = b_info.get("path") or b_info.get("filepath") or str(k)
-            if (
-                b_path == identifier
-                or os.path.abspath(b_path) == norm_id
-                or (target_name and os.path.basename(b_path) == target_name)
-            ):
+            if b_path == identifier or os.path.abspath(b_path) == norm_id:
                 return k, b_info
+
+        # Last resort: a unique file-name match. Ambiguous names (two books called
+        # "notes.pdf" in different folders) must NOT resolve to an arbitrary one.
+        target_name = os.path.basename(identifier)
+        matches = [
+            (k, b_info)
+            for k, b_info in self.books.items()
+            if isinstance(b_info, dict)
+            and target_name
+            and os.path.basename(b_info.get("path") or b_info.get("filepath") or str(k)) == target_name
+        ]
+        if len(matches) == 1:
+            return matches[0]
 
         return None, None
 

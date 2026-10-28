@@ -512,7 +512,7 @@ class NeuralTTSWorker(QThread):
             )
 
     def run(self):
-        if not self.units:
+        if not self.units and not getattr(self, "expect_more_units", False):
             self.playback_state_changed.emit("stopped")
             return
 
@@ -523,7 +523,19 @@ class NeuralTTSWorker(QThread):
 
         try:
             idx = self.current_index
-            while idx < len(self.units) and not self._stop_requested:
+            while not self._stop_requested:
+                # Wait for units to become available when the background daemon
+                # is still extracting text from upcoming pages.
+                if idx >= len(self.units):
+                    if not getattr(self, "expect_more_units", False):
+                        break
+                    # Poll until new units arrive or preparation finishes
+                    while idx >= len(self.units) and not self._stop_requested:
+                        if not getattr(self, "expect_more_units", False):
+                            break
+                        time.sleep(0.1)
+                    if idx >= len(self.units):
+                        break
                 while self.is_paused and not self._stop_requested:
                     time.sleep(0.04)
                 if self._stop_requested:
@@ -578,10 +590,13 @@ class NeuralTTSWorker(QThread):
                     )
                     self._play_audio_file(audio_file)
 
-                    try:
-                        os.remove(audio_file)
-                    except OSError:
-                        pass
+                    # Only clean up the audio file if the sentence finished
+                    # or was stopped — NOT when paused, so it replays on resume.
+                    if not self.is_paused:
+                        try:
+                            os.remove(audio_file)
+                        except OSError:
+                            pass
 
                     # If settings/voice changed during playback, don't advance idx:
                     # immediately replay this sentence with the new voice!

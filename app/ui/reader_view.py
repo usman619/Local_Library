@@ -11,6 +11,7 @@ from PySide6.QtWidgets import (
 
 from app.config import DEFAULT_EPUB_FONTSIZE, TTS_VOICES, HIGHLIGHT_COLORS
 from app.core.epub_loader import open_clean_document
+from app.core.doc_daemon import DocDaemon
 from app.ui.widgets import DocumentCanvasView
 from app.ui.dialogs import (
     LookupPopupDialog,
@@ -23,8 +24,12 @@ from app.core.tts_worker import (
     NeuralTTSWorker,
     TTSUnit,
     build_page_units,
-    extract_page_tts_units,
 )
+
+# In-book search stops after this many hits. "the" in a 1,000-page book is >100k matches;
+# listing them all would stall the UI even with the search itself off the GUI thread.
+SEARCH_MAX_MATCHES = 3000
+
 
 class ReaderView(QWidget):
     """Document reader with Evince-style Search Bar (Ctrl+F), Drag-to-Highlight, Spread Modes, and Neural TTS."""
@@ -45,12 +50,55 @@ class ReaderView(QWidget):
 
         self.tts_worker: NeuralTTSWorker | None = None
         self._initializing_toc = False
+
+        # Heavy PyMuPDF work (in-book search, OCR / text extraction for TTS) runs in separate
+        # worker PROCESSES, never on the GUI thread: PyMuPDF is not thread-safe.
+        self._daemons: dict[str, DocDaemon] = {}
+        self._search_running = False
+        self._search_capped = False
+        self._search_pct = 0
+        self._search_focused = False
+        self._search_start_page = 0
+        self._search_matches_by_page: dict[int, list] = {}
+        self._tts_prep: dict | None = None
         self._build_ui()
         self._setup_shortcuts()
 
         self._reading_timer = QTimer(self)
         self._reading_timer.setInterval(15000)  # Every 15 seconds while book is open
         self._reading_timer.timeout.connect(self._record_reading_heartbeat)
+
+        # library.json is rewritten in full on every save(). Page turns, zoom steps,
+        # TTS sentences and slider drags can fire many times a second, so those go
+        # through this debounce instead of hitting the disk on the GUI thread each time.
+        self._save_timer = QTimer(self)
+        self._save_timer.setSingleShot(True)
+        self._save_timer.setInterval(700)
+        self._save_timer.timeout.connect(self._flush_save)
+
+    # -----------------------------------------------------------------
+    # BACKGROUND WORKER PROCESSES
+    # -----------------------------------------------------------------
+    def _daemon(self, kind: str) -> DocDaemon:
+        d = self._daemons.get(kind)
+        if d is None:
+            d = DocDaemon(self.current_book.get("path", ""), self.epub_fontsize, self)
+            d.event.connect(self._on_search_event if kind == "search" else self._on_tts_prep_event)
+            self._daemons[kind] = d
+        return d
+
+    def _shutdown_daemons(self):
+        for d in self._daemons.values():
+            d.shutdown()
+            d.deleteLater()
+        self._daemons.clear()
+
+    def _schedule_save(self):
+        self._save_timer.start()
+
+    def _flush_save(self):
+        self._save_timer.stop()
+        self.store.save()
 
     def _build_ui(self):
         root = QVBoxLayout(self)
@@ -333,30 +381,6 @@ class ReaderView(QWidget):
 
         root.addWidget(tts_bar)
 
-    def _collect_tts_units_window(self, start_page: int, max_pages: int = 15) -> list[TTSUnit]:
-     if not self.doc or not self.current_book:
-         return []
-
-     filepath = self.current_book.get("path", "")
-     end_page = min(len(self.doc), start_page + max_pages)
-     units: list[TTSUnit] = []
-
-     for p_idx in range(start_page, end_page):
-         page_units, used_ocr = extract_page_tts_units(
-             self.doc, p_idx, filepath=filepath, allow_ocr=True
-         )
-         if used_ocr:
-             self._on_tts_status(
-                 f"🔍 OCR Extracted {len(page_units)} sentences from scanned Page {p_idx + 1}..."
-             )
-         units.extend(page_units)
-         # If the book is a heavy scanned PDF requiring live OCR, only OCR 2 pages ahead initially
-         # so audio starts speaking immediately!
-         if used_ocr and (p_idx - start_page) >= 1 and len(units) >= 5:
-             break
-
-     return units
-
     def _setup_shortcuts(self):
         self.shortcut_find = QShortcut(QKeySequence("Ctrl+F"), self)
         self.shortcut_find.activated.connect(self.open_search_bar)
@@ -457,17 +481,29 @@ class ReaderView(QWidget):
             self._execute_search()
 
     def close_search_bar(self):
+        self._cancel_search()
         self.search_bar.hide()
         self.canvas.clear_search_overlays()
         self.canvas.setFocus()
 
+    def _cancel_search(self):
+        d = self._daemons.get("search")
+        if d is not None:
+            d.cancel()
+        self._search_running = False
+
     def _execute_search(self):
+        self._cancel_search()
         self.search_results.clear()
         self.search_list.clear()
         self.current_search_idx = -1
+        self._search_matches_by_page = {}
+        self._search_focused = False
+        self._search_capped = False
+        self._search_pct = 0
 
         query = self.search_input.text().strip()
-        if not self.doc or len(query) < 2:
+        if not self.doc or not self.current_book or len(query) < 2:
             self.lbl_search_count.setText(
                 "Enter 2+ characters" if query else "0 matches"
             )
@@ -477,57 +513,101 @@ class ReaderView(QWidget):
             self.canvas.clear_search_overlays()
             return
 
-        matches_by_page: dict[int, list[pymupdf.Rect]] = {}
-        q_lower = query.lower()
+        # The search itself runs in a worker process that streams results back, so typing,
+        # scrolling and zooming stay smooth even on a 1,000-page book.
+        self.canvas.clear_search_overlays()
+        self.lbl_search_count.setText("Searching…")
+        self.lbl_search_count.setStyleSheet("color: #A6ADC8; font-size: 12px;")
+        self.btn_prev_match.setEnabled(False)
+        self.btn_next_match.setEnabled(False)
+        self._search_running = True
+        self._search_start_page = int(self.current_book.get("current_page", 0))
+        self._daemon("search").request("search", query=query, cap=SEARCH_MAX_MATCHES)
 
-        for page_idx in range(len(self.doc)):
-            page = self.doc.load_page(page_idx)
-            rects = page.search_for(query)
-            if not rects:
-                continue
+    def _update_search_label(self):
+        n = len(self.search_results)
+        if self.current_search_idx >= 0:
+            text = f"{self.current_search_idx + 1} of {n}"
+        else:
+            text = f"{n} found"
+        if self._search_capped and not self._search_running:
+            text += "+"
+        if self._search_running:
+            text += f" … {self._search_pct}%"
+        self.lbl_search_count.setText(text)
 
-            matches_by_page[page_idx] = rects
-            page_text = " ".join(page.get_text("text").split())
-            pt_lower = page_text.lower()
-            search_pos = 0
+    def _refresh_search_overlays(self):
+        active = None
+        if 0 <= self.current_search_idx < len(self.search_results):
+            page_idx, rect, _ = self.search_results[self.current_search_idx]
+            active = (page_idx, rect)
+        self.canvas.set_search_overlays(self._search_matches_by_page, active)
 
-            for r in rects:
-                pos = pt_lower.find(q_lower, search_pos)
-                if pos != -1:
-                    start = max(0, pos - 30)
-                    end = min(len(page_text), pos + len(query) + 40)
-                    snippet = ("..." if start > 0 else "") + page_text[start:end] + ("..." if end < len(page_text) else "")
-                    search_pos = pos + len(query)
-                else:
-                    snippet = query
-
-                match_idx = len(self.search_results)
-                self.search_results.append((page_idx, r, snippet))
-
-                item = QListWidgetItem(f"[p. {page_idx + 1}]  {snippet}")
-                item.setData(Qt.UserRole, match_idx)
-                self.search_list.addItem(item)
-
-        if not self.search_results:
-            self.lbl_search_count.setText("No matches")
+    def _on_search_event(self, ev: dict):
+        kind = ev.get("event")
+        if kind in ("fatal", "error"):
+            self._search_running = False
+            self.lbl_search_count.setText("Search failed")
+            self.lbl_search_count.setToolTip(str(ev.get("error", "")))
             self.lbl_search_count.setStyleSheet("color: #F38BA8; font-size: 12px;")
-            self.btn_prev_match.setEnabled(False)
-            self.btn_next_match.setEnabled(False)
-            self.canvas.clear_search_overlays()
+            return
+        if not self._search_running:
             return
 
-        self.lbl_search_count.setStyleSheet("color: #A6E3A1; font-size: 12px;")
-        self.btn_prev_match.setEnabled(True)
-        self.btn_next_match.setEnabled(True)
-        cur_p = self.current_book.get("current_page", 0) if self.current_book else 0
-        first_idx = 0
-        for idx, (p_idx, _, _) in enumerate(self.search_results):
-            if p_idx >= cur_p:
-                first_idx = idx
-                break
+        if kind == "search_batch":
+            total = max(1, int(ev.get("total", 1)))
+            self._search_pct = min(100, int(ev.get("pages_done", 0) * 100 / total))
+            first_forward = None
+            for item in ev.get("batch", []):
+                page_idx = int(item["page"])
+                for h in item["hits"]:
+                    rect = pymupdf.Rect(*h["rect"])
+                    match_idx = len(self.search_results)
+                    self.search_results.append((page_idx, rect, h["snippet"]))
+                    self._search_matches_by_page.setdefault(page_idx, []).append(rect)
+                    li = QListWidgetItem(f"[p. {page_idx + 1}]  {h['snippet']}")
+                    li.setData(Qt.UserRole, match_idx)
+                    self.search_list.addItem(li)
+                    if first_forward is None and page_idx >= self._search_start_page:
+                        first_forward = match_idx
 
-        self.sidebar_tabs.setCurrentWidget(self.search_list)
-        self._focus_search_match(first_idx, matches_by_page)
+            if self.search_results:
+                self.lbl_search_count.setStyleSheet("color: #A6E3A1; font-size: 12px;")
+                self.btn_prev_match.setEnabled(True)
+                self.btn_next_match.setEnabled(True)
+            # Jump to the first match at/after the page being read as soon as it shows up
+            # (the same match the old blocking search picked), then leave the view alone.
+            if not self._search_focused and first_forward is not None:
+                self._search_focused = True
+                self.sidebar_tabs.setCurrentWidget(self.search_list)
+                self._focus_search_match(first_forward, self._search_matches_by_page)
+            else:
+                self._refresh_search_overlays()
+                self._update_search_label()
+
+        elif kind == "search_done":
+            self._search_running = False
+            self._search_capped = bool(ev.get("capped"))
+            if not self.search_results:
+                self.lbl_search_count.setText("No matches")
+                self.lbl_search_count.setStyleSheet("color: #F38BA8; font-size: 12px;")
+                self.btn_prev_match.setEnabled(False)
+                self.btn_next_match.setEnabled(False)
+                self.canvas.clear_search_overlays()
+                return
+            if not self._search_focused:
+                # Every match is before the current page: wrap around to the first one.
+                self._search_focused = True
+                self.sidebar_tabs.setCurrentWidget(self.search_list)
+                self._focus_search_match(0, self._search_matches_by_page)
+            else:
+                self._update_search_label()
+            if self._search_capped:
+                self.lbl_search_count.setToolTip(
+                    f"Showing the first {SEARCH_MAX_MATCHES} matches. Refine the search to narrow it down."
+                )
+            else:
+                self.lbl_search_count.setToolTip("")
 
     def _focus_search_match(
         self,
@@ -542,9 +622,7 @@ class ReaderView(QWidget):
         if matches_by_page is None:
             matches_by_page = self.canvas.search_matches_by_page
 
-        self.lbl_search_count.setText(
-            f"{self.current_search_idx + 1} of {len(self.search_results)}"
-        )
+        self._update_search_label()
         self.search_list.setCurrentRow(self.current_search_idx)
         self.canvas.set_search_overlays(matches_by_page, (page_idx, rect))
         self.canvas.ensure_page_rect_visible(page_idx, rect)
@@ -565,14 +643,34 @@ class ReaderView(QWidget):
     # -----------------------------------------------------------------
     # BOOK LOADING, VIEW MODES & CANVAS COORDINATION
     # -----------------------------------------------------------------
-    def load_book(self, filepath: str):
+    def load_book(self, filepath: str) -> bool:
+        """Opens filepath in the reader. Returns False (and keeps the current view) on failure."""
         self.stop_tts()
         self.close_search_bar()
-        if self.doc:
-            self.doc.close()
+        self._shutdown_daemons()  # they hold the OLD book open
+        self._flush_save()
 
-        self.doc = open_clean_document(filepath, fontsize=self.epub_fontsize)
-        self.current_book = self.store.add_or_update_book(filepath, open_doc=self.doc)
+        try:
+            new_doc = open_clean_document(filepath, fontsize=self.epub_fontsize)
+        except Exception as e:
+            QMessageBox.warning(
+                self, "Cannot Open Book", f"Could not open:\n{filepath}\n\n{e}"
+            )
+            return False
+
+        book = self.store.add_or_update_book(filepath, open_doc=new_doc)
+        if book is None:
+            new_doc.close()
+            QMessageBox.warning(
+                self, "Cannot Open Book", f"Unsupported or unreadable file:\n{filepath}"
+            )
+            return False
+
+        # Only close the previous document once the new one is ready; closing it first
+        # left the canvas pointing at a closed document whenever opening failed.
+        old_doc = self.doc
+        self.doc = new_doc
+        self.current_book = book
         self.store.touch_last_opened(filepath)
 
         tts_state = self.current_book.get("tts_state", {})
@@ -600,6 +698,11 @@ class ReaderView(QWidget):
         self._populate_highlights()
 
         self.canvas.set_document(self.doc, self.current_book.get("highlights", []))
+        if old_doc is not None and old_doc is not self.doc:
+            try:
+                old_doc.close()
+            except Exception:
+                pass
         self._reading_timer.start()
 
         saved_page = min(
@@ -615,12 +718,15 @@ class ReaderView(QWidget):
             self._initializing_toc = False
         self._sync_toc_selection(saved_page, expand_ancestors=False)
         self._emit_status()
+        return True
 
     def close_book(self):
         """Closes the active document, stops TTS, and clears reader state when returning Home."""
         self.stop_tts()
         self.close_search_bar()
         self._reading_timer.stop()
+        self._shutdown_daemons()
+        self._flush_save()
         if self.doc:
             try:
                 self.doc.close()
@@ -637,10 +743,9 @@ class ReaderView(QWidget):
 
     def _record_reading_heartbeat(self):
         if self.doc and self.current_book and self.isVisible():
+            # current_book is the very same dict as store.books[<id>], so add_reading_time()
+            # already updates it. Adding 15 again here counted every heartbeat as 30 s.
             self.store.add_reading_time(self.current_book["path"], 15)
-            self.current_book["reading_seconds"] = (
-                int(self.current_book.get("reading_seconds", 0)) + 15
-            )
 
     def open_lookup_dialog(self, selected_text: str):
         if selected_text.strip():
@@ -687,17 +792,19 @@ class ReaderView(QWidget):
     ):
         if not self.doc or not self.current_book:
             return
-        self.current_book["current_page"] = page_idx
-        self.store.save()
-        self._sync_toc_selection(
-            page_idx, expand_ancestors=not self._initializing_toc
-        )
+        # page_changed also fires on every zoom step; only do the heavy work on a real page change.
+        if self.current_book.get("current_page") != page_idx:
+            self.current_book["current_page"] = page_idx
+            self._schedule_save()
+            self._sync_toc_selection(
+                page_idx, expand_ancestors=not self._initializing_toc
+            )
         self._emit_status()
 
     def _on_canvas_zoom_changed(self, new_zoom: float):
         if self.current_book:
             self.current_book["zoom"] = round(float(new_zoom), 2)
-            self.store.save()
+            self._schedule_save()
         self._emit_status()
     
     def zoom_in(self):
@@ -1067,7 +1174,7 @@ class ReaderView(QWidget):
             tts_state["voice"] = voice
             tts_state["speed"] = speed
             tts_state["pitch"] = pitch
-            self.store.save()
+            self._schedule_save()
 
         # 3. Hot-update running worker so upcoming prefetched sentences use the new settings immediately
         if self.tts_worker and self.tts_worker.isRunning():
@@ -1093,42 +1200,59 @@ class ReaderView(QWidget):
         self._save_current_tts_prefs()
     @staticmethod
     def _find_matching_tts_unit_index(
-        units: list[TTSUnit], page_idx: int, selected_text: str
+        units: list[TTSUnit],
+        page_idx: int,
+        selected_text: str,
+        hint_rect=None,
     ) -> int:
-        """Finds the exact TTSUnit matching the user's selected word, sentence, or paragraph."""
+        """
+        Finds the TTSUnit matching the user's selected word, sentence, or paragraph.
+        hint_rect (PDF coordinates of the first selected line) disambiguates repeated
+        text: selecting the 3rd "the" on a page used to start at the 1st sentence containing "the".
+        """
         import re
 
         def norm(s: str) -> str:
             return re.sub(r"[^\w\s]", "", " ".join(s.lower().split()))
 
-        sel_clean = " ".join(selected_text.split()).lower()
+        def pick(cands: list[int]) -> int | None:
+            if not cands:
+                return None
+            if hint_rect is not None:
+                cx = (hint_rect[0] + hint_rect[2]) / 2.0
+                cy = (hint_rect[1] + hint_rect[3]) / 2.0
+                for i in cands:
+                    bb = units[i].bbox
+                    if bb and bb[0] - 2 <= cx <= bb[2] + 2 and bb[1] - 2 <= cy <= bb[3] + 2:
+                        return i
+            return cands[0]
+
         sel_norm = norm(selected_text)
         sel_words = sel_norm.split()
+        page_units = [(i, u, norm(u.text)) for i, u in enumerate(units) if u.page_idx == page_idx]
 
-        # 1. Exact substring match on normalized text (first 40 chars)
+        # 1. Exact substring match on normalized text (first 45 chars)
         needle = sel_norm[:45].strip()
         if needle:
-            for idx, u in enumerate(units):
-                if u.page_idx == page_idx and needle in norm(u.text):
-                    return idx
+            hit = pick([i for i, _u, n in page_units if needle in n])
+            if hit is not None:
+                return hit
 
         # 2. Match if the unit text is contained inside a multi-sentence paragraph selection
         if len(sel_norm) > 25:
-            for idx, u in enumerate(units):
-                u_norm = norm(u.text)
-                if u.page_idx == page_idx and len(u_norm) >= 10 and u_norm[:30] in sel_norm:
-                    return idx
+            hit = pick([i for i, _u, n in page_units if len(n) >= 10 and n[:30] in sel_norm])
+            if hit is not None:
+                return hit
 
         # 3. Single-word or short-phrase token match
         if sel_words:
             first_phrase = " ".join(sel_words[: min(3, len(sel_words))])
-            for idx, u in enumerate(units):
-                if u.page_idx == page_idx and first_phrase in norm(u.text):
-                    return idx
-            first_word = sel_words[0]
-            for idx, u in enumerate(units):
-                if u.page_idx == page_idx and first_word in norm(u.text).split():
-                    return idx
+            hit = pick([i for i, _u, n in page_units if first_phrase in n])
+            if hit is not None:
+                return hit
+            hit = pick([i for i, _u, n in page_units if sel_words[0] in n.split()])
+            if hit is not None:
+                return hit
 
         return 0
 
@@ -1145,51 +1269,166 @@ class ReaderView(QWidget):
         if not selected_clean:
             return
 
-        # Replaces the entire old for-loop:
-        units = self._collect_tts_units_window(page_idx, max_pages=15)
+        hint = getattr(self.canvas, "tts_hint_rect", None)
+        self.canvas.tts_hint_rect = None
+        self._begin_tts_prepare(
+            page_idx,
+            {"mode": "selection", "page_idx": page_idx, "selected": selected_clean, "hint": hint},
+        )
 
-        # Fallback: if build_page_units filtered out short/copyright text on this page,
-        # synthesize TTSUnits directly from the selected text so '▶ Read' ALWAYS works.
-        if not units:
+    # -----------------------------------------------------------------
+    # BACKGROUND TEXT PREPARATION FOR TTS (incl. OCR of scanned pages)
+    # -----------------------------------------------------------------
+    def _begin_tts_prepare(self, start_page: int, plan: dict):
+        """Extracts the text to speak in a worker process; playback starts when page 1 is ready."""
+        self._cancel_tts_prepare()
+        if not self.doc or not self.current_book:
+            return
+        self._tts_prep = {
+            "plan": plan,
+            "start_page": start_page,
+            "units": [],
+            "launched": False,
+            "done": False,
+        }
+        self.btn_tts_play_pause.setText("⏳")
+        self.btn_tts_play_pause.setToolTip("Preparing text… click to cancel")
+        self._on_tts_status(f"⏳ Preparing text from page {start_page + 1}...")
+        self._daemon("tts").request(
+            "tts_units",
+            filepath=self.current_book.get("path", ""),
+            start_page=start_page,
+            max_pages=15,
+            allow_ocr=True,
+        )
+
+    def _cancel_tts_prepare(self):
+        d = self._daemons.get("tts")
+        if d is not None:
+            d.cancel()
+        self._tts_prep = None
+        if self.tts_worker is not None:
+            self.tts_worker.expect_more_units = False
+
+    def _on_tts_prep_event(self, ev: dict):
+        kind = ev.get("event")
+        prep = self._tts_prep
+        if kind in ("fatal", "error"):
+            if prep is not None:
+                launched = prep["launched"]
+                self._tts_prep = None
+                if self.tts_worker is not None:
+                    self.tts_worker.expect_more_units = False
+                self._on_tts_status(f"⚠ TTS Error: {ev.get('error', 'could not read the page text')}")
+                if not launched:
+                    self.btn_tts_play_pause.setText("▶")
+                    self.btn_tts_play_pause.setToolTip("Play / Resume TTS")
+            return
+        if prep is None:
+            return
+
+        if kind == "tts_page_start":
+            if not prep["launched"]:
+                self._on_tts_status(
+                    f"⏳ Preparing text from page {int(ev['page']) + 1}... "
+                    "(scanned pages are OCR'd; this can take a few seconds)"
+                )
+        elif kind == "tts_page":
             units = [
                 TTSUnit(
-                    page_idx=page_idx,
-                    para_idx=0,
-                    sent_idx=0,
-                    text=selected_clean,
+                    page_idx=int(u["page_idx"]),
+                    para_idx=int(u["para_idx"]),
+                    sent_idx=int(u["sent_idx"]),
+                    text=u["text"],
+                    bbox=tuple(u["bbox"]) if u.get("bbox") else None,
                 )
+                for u in ev.get("units", [])
             ]
-            start_index = 0
+            if ev.get("used_ocr"):
+                self._on_tts_status(
+                    f"🔍 OCR Extracted {len(units)} sentences from scanned Page {int(ev['page']) + 1}..."
+                )
+            # Same list object the running worker reads from, so playback continues onto
+            # these pages without being restarted.
+            prep["units"].extend(units)
+            if not prep["launched"]:
+                self._try_launch_prepared(final=False)
+        elif kind == "tts_done":
+            prep["done"] = True
+            if self.tts_worker is not None:
+                self.tts_worker.expect_more_units = False
+            if not prep["launched"]:
+                self._try_launch_prepared(final=True)
+            self._tts_prep = None
+
+    def _try_launch_prepared(self, final: bool):
+        prep = self._tts_prep
+        if prep is None or prep["launched"]:
+            return
+        units: list[TTSUnit] = prep["units"]
+        plan = prep["plan"]
+        if not units and not final:
+            return  # blank page so far; keep looking at the following pages
+
+        if plan["mode"] == "selection":
+            page_idx = plan["page_idx"]
+            selected_clean = plan["selected"]
+            # Fallback: if build_page_units filtered out short/copyright text on this page,
+            # synthesize TTSUnits directly from the selected text so '▶ Read' ALWAYS works.
+            if not units:
+                units.append(
+                    TTSUnit(page_idx=page_idx, para_idx=0, sent_idx=0, text=selected_clean)
+                )
+                start_index = 0
+            else:
+                start_index = self._find_matching_tts_unit_index(
+                    units, page_idx, selected_clean, hint_rect=plan.get("hint")
+                )
+                # If the user selected a phrase inside a longer sentence, trim the first unit
+                # so speech starts at the exact word they selected
+                matched_unit = units[start_index]
+                pos = matched_unit.text.lower().find(selected_clean[:25].lower())
+                if pos > 0:
+                    trimmed = matched_unit.text[pos:].strip()
+                    if len(trimmed) >= 3:
+                        units[start_index] = TTSUnit(
+                            page_idx=matched_unit.page_idx,
+                            para_idx=matched_unit.para_idx,
+                            sent_idx=matched_unit.sent_idx,
+                            text=trimmed,
+                            bbox=matched_unit.bbox,
+                        )
+            target_unit = units[start_index]
+            if self.current_book is not None:
+                self.current_book["tts_state"] = {
+                    "page": target_unit.page_idx,
+                    "para_idx": target_unit.para_idx,
+                    "sent_idx": target_unit.sent_idx,
+                    "voice": self.combo_voice.currentText(),
+                    "speed": self._current_speed(),
+                    "pitch": self._current_pitch(),
+                }
+                self._schedule_save()
+            self._on_tts_status(f"Starting TTS on Page {page_idx + 1}: “{selected_clean[:45]}...”")
         else:
-            start_index = self._find_matching_tts_unit_index(units, page_idx, selected_clean)
-            # If the user selected a specific phrase inside a longer sentence, trim the first unit
-            # so speech starts at the exact word they selected
-            matched_unit = units[start_index]
-            pos = matched_unit.text.lower().find(selected_clean[:25].lower())
-            if pos > 0:
-                trimmed = matched_unit.text[pos:].strip()
-                if len(trimmed) >= 3:
-                    units[start_index] = TTSUnit(
-                        page_idx=matched_unit.page_idx,
-                        para_idx=matched_unit.para_idx,
-                        sent_idx=matched_unit.sent_idx,
-                        text=trimmed,
-                        bbox=matched_unit.bbox,
-                    )
+            if not units:
+                self._tts_prep = None
+                self.btn_tts_play_pause.setText("▶")
+                self.btn_tts_play_pause.setToolTip("Play / Resume TTS")
+                self._on_tts_status("TTS Warning: No readable text found on this page.")
+                return
+            cur_page = prep["start_page"]
+            start_index = 0
+            for idx, u in enumerate(units):
+                if u.page_idx == cur_page and (
+                    u.para_idx > plan["saved_para"]
+                    or (u.para_idx == plan["saved_para"] and u.sent_idx >= plan["saved_sent"])
+                ):
+                    start_index = idx
+                    break
 
-        target_unit = units[start_index]
-        self.current_book["tts_state"] = {
-            "page": target_unit.page_idx,
-            "para_idx": target_unit.para_idx,
-            "sent_idx": target_unit.sent_idx,
-            "voice": self.combo_voice.currentText(),
-            "speed": self._current_speed(),
-            "pitch": self._current_pitch(),
-        }
-        self.store.save()
-
-        self._on_tts_status(f"Starting TTS on Page {page_idx + 1}: “{selected_clean[:45]}...”")
-        self._launch_tts_worker(units, start_index)
+        prep["launched"] = True
+        self._launch_tts_worker(units, start_index, more_expected=not final)
 
     def toggle_tts_play_pause(self):
         if not self.doc or not self.current_book:
@@ -1199,6 +1438,7 @@ class ReaderView(QWidget):
         # clicking Play (▶) immediately starts reading from that selection!
         sel_page, sel_text = self.canvas.get_active_selection()
         if sel_page is not None and sel_text:
+            self.canvas.tts_hint_rect = self.canvas.first_selection_rect()
             self.canvas.clear_selection()
             self._start_tts_from_selection(sel_page, sel_text)
             return
@@ -1209,6 +1449,12 @@ class ReaderView(QWidget):
                 self.tts_worker.resume()
             else:
                 self.tts_worker.pause()
+            return
+
+        # Priority 2b: text is still being prepared in the background -> button cancels it
+        if self._tts_prep is not None and not self._tts_prep["launched"]:
+            self.stop_tts()
+            self._on_tts_status("TTS preparation cancelled.")
             return
 
         # Priority 3: Resume from saved TTS position on current page (or start at top of current page)
@@ -1224,26 +1470,16 @@ class ReaderView(QWidget):
             saved_para = 0
             saved_sent = 0
 
-        # Replaces the entire old for-loop:
-        units = self._collect_tts_units_window(cur_page, max_pages=15)
+        self._begin_tts_prepare(
+            cur_page, {"mode": "resume", "saved_para": saved_para, "saved_sent": saved_sent}
+        )
 
-        if not units:
-            self._on_tts_status("TTS Warning: No readable text found on this page.")
-            return
-
-        start_index = 0
-        for idx, u in enumerate(units):
-            if u.page_idx == cur_page and (
-                u.para_idx > saved_para
-                or (u.para_idx == saved_para and u.sent_idx >= saved_sent)
-            ):
-                start_index = idx
-                break
-
-        self._launch_tts_worker(units, start_index)
-
-    def _launch_tts_worker(self, units: list[TTSUnit], start_index: int):
-        self.stop_tts()
+    def _launch_tts_worker(
+        self, units: list[TTSUnit], start_index: int, more_expected: bool | None = None
+    ):
+        self._stop_tts_worker()  # NOT stop_tts(): that would also cancel background preparation
+        if more_expected is None:
+            more_expected = self._tts_prep is not None and not self._tts_prep.get("done", False)
         self.current_tts_units = units
         voice_spec = self.combo_voice.currentText()
         speed = self._current_speed()
@@ -1256,6 +1492,7 @@ class ReaderView(QWidget):
             speed=speed,
             pitch=pitch,
         )
+        self.tts_worker.expect_more_units = more_expected
         self.tts_worker.status_changed.connect(self._on_tts_status)
         self.tts_worker.unit_started.connect(self._on_tts_unit_started)
         self.tts_worker.playback_state_changed.connect(self._on_tts_playback_state_changed)
@@ -1316,7 +1553,7 @@ class ReaderView(QWidget):
                 "speed": self._current_speed(),
                 "pitch": self._current_pitch(),
             }
-            self.store.save()
+            self._schedule_save()
 
         if prev_page is not None and prev_page != page_idx:
             self.canvas.invalidate_page(prev_page)
@@ -1347,6 +1584,10 @@ class ReaderView(QWidget):
             self.lbl_tts_status.setStyleSheet("color: #A6E3A1; font-size: 12px;")
 
     def stop_tts(self):
+        self._cancel_tts_prepare()
+        self._stop_tts_worker()
+
+    def _stop_tts_worker(self):
         if self.tts_worker:
             worker = self.tts_worker
             self.tts_worker = None
@@ -1373,6 +1614,22 @@ class ReaderView(QWidget):
         self.btn_tts_play_pause.setText("▶")
         self.btn_tts_play_pause.setToolTip("Play / Resume TTS")
     
+    def wait_for_workers(self, timeout_ms: int = 4000):
+        """Called on app exit: quitting while a QThread is still running aborts the process."""
+        self._shutdown_daemons()
+        workers = list(getattr(self, "_stopping_workers", set()))
+        if self.tts_worker is not None:
+            workers.append(self.tts_worker)
+        for w in workers:
+            try:
+                if w.isRunning():
+                    w.stop()
+                    if not w.wait(timeout_ms):
+                        w.terminate()
+                        w.wait(500)
+            except RuntimeError:
+                pass  # underlying C++ object already gone
+
     # Auto Scrolling
     def _update_follow_button_ui(self, locked: bool):
         """Updates the visual state of the Lock/Unlock TTS Follow button."""

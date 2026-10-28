@@ -2,6 +2,7 @@ import os
 import math
 import bisect
 import webbrowser
+from urllib.parse import urlparse
 import pymupdf
 from PySide6.QtCore import (
     Qt, QSize, Signal, QEvent, QPoint, QPointF, QRect, QRectF, QTimer,
@@ -215,6 +216,7 @@ class DocumentCanvasView(QAbstractScrollArea):
         # True from the first zoom step until sharp re-rendering has finished.
         # While set, paintEvent never renders at the new zoom synchronously.
         self._zoom_settling = False
+        self.tts_hint_rect = None  # first selected line (PDF coords) for "read from here"
 
         # Coalesce high-rate wheel / pinch events to at most one zoom per frame.
         self._pending_zoom_factor = 1.0
@@ -261,16 +263,31 @@ class DocumentCanvasView(QAbstractScrollArea):
         self.viewport().update()
     
     def set_zoom(self, new_zoom: float):
-        """Sets the zoom level and re-renders the viewport."""
+        """Sets the zoom level, re-lays out the pages and re-renders the viewport."""
         if self._zoom_anim.state() == QVariantAnimation.Running:
             self._zoom_anim.stop()
         self._zooming = False
-        self.zoom = max(0.5, min(3.5, float(new_zoom)))
+        self._anchor_state = None
+        self._zoom_flush.stop()
+        self._sharp_chain.stop()
+        self._zoom_settling = False
+
+        new_zoom = max(0.5, min(3.5, float(new_zoom)))
+        if abs(new_zoom - self.zoom) > 1e-6:
+            # Page sizes (page_y/page_w/page_h) are derived from the zoom. Without a
+            # re-layout the pages kept the old geometry while pixmaps and hit-testing
+            # used the new zoom (blurry pages, selection offset from the text).
+            vp = self.viewport()
+            centre = QPointF(vp.width() / 2.0, vp.height() / 2.0)
+            state = self._capture_anchor(centre) if (self.doc and self.page_y) else None
+            self.zoom = new_zoom
+            with QSignalBlocker(self.verticalScrollBar()), QSignalBlocker(
+                self.horizontalScrollBar()
+            ):
+                self._recalculate_layout()
+                self._restore_anchor(state, centre)
         self.zoom_changed.emit(self.zoom)
-        if hasattr(self, "_cache") and isinstance(self._cache, dict):
-            self._cache.clear()
-        if hasattr(self, "_pixmap_cache") and isinstance(self._pixmap_cache, dict):
-            self._pixmap_cache.clear()
+        self._pixmap_cache.clear()
         self.viewport().update()
 
     def animate_zoom_to(self, new_zoom: float, anchor_pos: QPointF):
@@ -336,6 +353,8 @@ class DocumentCanvasView(QAbstractScrollArea):
         fit_z = min(vp_w / max(1.0, base_w), vp_h / max(1.0, base_h))
         self.zoom = max(0.5, min(2.5, round(fit_z, 2)))
         self._recalculate_layout()
+        self._zoom_settling = True
+        self._sharp_timer.start()  # re-render pixmaps at the new zoom
 
     @staticmethod
     def _normalize_spread_anchor(page_idx: int) -> int:
@@ -527,8 +546,9 @@ class DocumentCanvasView(QAbstractScrollArea):
                 # 2. URI / Web link
                 uri = link.get("uri")
                 if uri:
-                    webbrowser.open(uri)
-                    return True
+                    if urlparse(uri).scheme.lower() in ("http", "https", "mailto"):
+                        webbrowser.open(uri)
+                    return True  # consumed either way; never fall through to selection
                 # 3. Named destination
                 dest = link.get("dest")
                 if dest is not None and self.doc:
@@ -788,6 +808,10 @@ class DocumentCanvasView(QAbstractScrollArea):
         self.selection_popup.show()
         self.selection_popup.raise_()
 
+    def first_selection_rect(self):
+        """PDF-space rect of the first selected line, or None."""
+        return tuple(self._sel_rects_pdf[0]) if self._sel_rects_pdf else None
+
     def clear_selection(self):
         self._is_selecting = False
         self._sel_page = None
@@ -821,6 +845,7 @@ class DocumentCanvasView(QAbstractScrollArea):
         if self._sel_page is not None and self._sel_text.strip():
             page = int(self._sel_page)
             txt = str(self._sel_text.strip())
+            self.tts_hint_rect = self.first_selection_rect()
             self.clear_selection()
             self.tts_requested_at_page.emit(page, txt)
 
@@ -919,7 +944,10 @@ class DocumentCanvasView(QAbstractScrollArea):
         bot_y = scroll_y + vp_h + buffer_y
 
         start_idx = max(0, bisect.bisect_right(self.page_y, top_y) - 1)
-        end_idx = min(len(self.page_y) - 1, bisect.bisect_right(self.page_y, bot_y))
+        # bisect_right() returns the index of the first page that starts *below* bot_y, so the
+        # last page that is actually inside the window is one before it. Without the "- 1" an
+        # extra, off-screen page was rendered synchronously inside every paint.
+        end_idx = max(start_idx, min(len(self.page_y) - 1, bisect.bisect_right(self.page_y, bot_y) - 1))
         return list(range(start_idx, end_idx + 1))
 
     def _on_scroll(self, _value: int):
@@ -1217,6 +1245,7 @@ class DocumentCanvasView(QAbstractScrollArea):
     def _rerender_sharp(self):
         """Gesture is over: keep the old pixmaps on screen and swap them one by one."""
         self._anchor_state = None
+        self.zoom_changed.emit(self.zoom)
         # Drop stale pixmaps that are off-screen so they can't reappear blurry later.
         visible = set(self._visible_pages_list())
         for p, (z, _pix) in list(self._pixmap_cache.items()):
