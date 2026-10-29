@@ -8,6 +8,7 @@ from PySide6.QtWidgets import (
     QFrame, QLabel, QComboBox, QPushButton, QLineEdit, QSlider,
     QMenu, QFileDialog, QMessageBox
 )
+from PySide6.QtCore import Qt, Signal, QTimer, QPoint, QPointF, QUrl, QRectF, QEvent, QSize
 
 from app.config import DEFAULT_EPUB_FONTSIZE, TTS_VOICES, HIGHLIGHT_COLORS
 from app.core.epub_loader import open_clean_document
@@ -25,6 +26,7 @@ from app.core.tts_worker import (
     TTSUnit,
     build_page_units,
 )
+from app.ui.icon import svg_icon
 
 # In-book search stops after this many hits. "the" in a 1,000-page book is >100k matches;
 # listing them all would stall the UI even with the search itself off the GUI thread.
@@ -290,35 +292,47 @@ class ReaderView(QWidget):
             "min-height: 30px; max-height: 30px; }"
         )
 
-        self.btn_prev_para = QPushButton("⏮")
-        self.btn_prev_para.setStyleSheet(icon_btn_style)
-        self.btn_prev_para.setToolTip("Previous Sentence / Paragraph")
-        self.btn_prev_para.clicked.connect(self.tts_prev_paragraph)
-        controls_row.addWidget(self.btn_prev_para)
+        self.btn_prev_sent = QPushButton()
+        self.btn_prev_sent.setIcon(svg_icon("skip_back", "#CDD6F4", 15))
+        self.btn_prev_sent.setIconSize(QSize(15, 15))
+        self.btn_prev_sent.setFixedSize(32, 32)
+        self.btn_prev_sent.setToolTip("Previous Sentence")
+        self.btn_prev_sent.clicked.connect(self.prev_tts_sentence)
+        controls_row.addWidget(self.btn_prev_sent)
 
-        self.btn_tts_play_pause = QPushButton("▶")
-        self.btn_tts_play_pause.setAccessibleName("Play or pause text to speech")
-        self.btn_tts_play_pause.setStyleSheet(
-            "QPushButton { padding: 0px; font-size: 15px; min-width: 40px; max-width: 40px; "
-            "min-height: 30px; max-height: 30px; background-color: #89B4FA; color: #11111B; border: none; }"
-            "QPushButton:hover { background-color: #B4BEFE; }"
-        )
-        self.btn_tts_play_pause.setToolTip("Play / Pause TTS")
-        self.btn_tts_play_pause.clicked.connect(self.toggle_tts_play_pause)
-        controls_row.addWidget(self.btn_tts_play_pause)
+        self.btn_tts_play = QPushButton()
+        self.btn_tts_play.setIcon(svg_icon("play", "#11111B", 16))
+        self.btn_tts_play.setIconSize(QSize(16, 16))
+        self.btn_tts_play.setFixedSize(36, 32)
+        self.btn_tts_play.setToolTip("Play / Pause Neural TTS (Space)")
+        self.btn_tts_play.setStyleSheet("""
+            QPushButton {
+                background-color: #89B4FA;
+                border: none;
+                border-radius: 7px;
+            }
+            QPushButton:hover {
+                background-color: #B4BEFE;
+            }
+        """)
+        self.btn_tts_play.clicked.connect(self.toggle_tts)
+        controls_row.addWidget(self.btn_tts_play)
 
-        self.btn_tts_stop = QPushButton("⏹")
-        self.btn_tts_stop.setAccessibleName("Stop text to speech")
-        self.btn_tts_stop.setStyleSheet(icon_btn_style)
-        self.btn_tts_stop.setToolTip("Stop TTS and Clear Highlight")
+        self.btn_tts_stop = QPushButton()
+        self.btn_tts_stop.setIcon(svg_icon("stop", "#F38BA8", 14))
+        self.btn_tts_stop.setIconSize(QSize(14, 14))
+        self.btn_tts_stop.setFixedSize(32, 32)
+        self.btn_tts_stop.setToolTip("Stop TTS")
         self.btn_tts_stop.clicked.connect(self.stop_tts)
         controls_row.addWidget(self.btn_tts_stop)
 
-        self.btn_next_para = QPushButton("⏭")
-        self.btn_next_para.setStyleSheet(icon_btn_style)
-        self.btn_next_para.setToolTip("Next Sentence / Paragraph")
-        self.btn_next_para.clicked.connect(self.tts_next_paragraph)
-        controls_row.addWidget(self.btn_next_para)
+        self.btn_next_sent = QPushButton()
+        self.btn_next_sent.setIcon(svg_icon("skip_forward", "#CDD6F4", 15))
+        self.btn_next_sent.setIconSize(QSize(15, 15))
+        self.btn_next_sent.setFixedSize(32, 32)
+        self.btn_next_sent.setToolTip("Next Sentence")
+        self.btn_next_sent.clicked.connect(self.next_tts_sentence)
+        controls_row.addWidget(self.btn_next_sent)
 
         controls_row.addSpacing(8)
 
@@ -1151,6 +1165,34 @@ class ReaderView(QWidget):
     # -----------------------------------------------------------------
     # STATEFUL NEURAL TTS CONTROLS, MEMORY & HIGHLIGHTING
     # -----------------------------------------------------------------
+    def prev_tts_sentence(self):
+        """Skips back to the previous TTS sentence unit."""
+        if hasattr(self, "tts_prev"):
+            self.tts_prev()
+            return
+        if self.tts_worker and self.current_tts_units:
+            target = max(0, self.tts_worker.current_index - 1)
+            if hasattr(self.tts_worker, "seek"):
+                self.tts_worker.seek(target)
+            else:
+                self.tts_worker.current_index = target
+
+    def next_tts_sentence(self):
+        """Skips forward to the next TTS sentence unit."""
+        if hasattr(self, "tts_next"):
+            self.tts_next()
+            return
+        if self.tts_worker and self.current_tts_units:
+            target = min(len(self.current_tts_units) - 1, self.tts_worker.current_index + 1)
+            if hasattr(self.tts_worker, "seek"):
+                self.tts_worker.seek(target)
+            else:
+                self.tts_worker.current_index = target
+    
+    def toggle_tts(self):
+        """Toggles Neural TTS playback between play, pause, and start."""
+        self.toggle_tts_play_pause()
+
     def _current_speed(self) -> float:
         return round(self.slider_speed.value() / 10.0, 1)
 
@@ -1291,8 +1333,8 @@ class ReaderView(QWidget):
             "launched": False,
             "done": False,
         }
-        self.btn_tts_play_pause.setText("⏳")
-        self.btn_tts_play_pause.setToolTip("Preparing text… click to cancel")
+        self.btn_tts_play.setIcon(svg_icon("rotate_ccw", "#11111B", 16))
+        self.btn_tts_play.setToolTip("Preparing text… click to cancel")
         self._on_tts_status(f"⏳ Preparing text from page {start_page + 1}...")
         self._daemon("tts").request(
             "tts_units",
@@ -1321,8 +1363,8 @@ class ReaderView(QWidget):
                     self.tts_worker.expect_more_units = False
                 self._on_tts_status(f"⚠ TTS Error: {ev.get('error', 'could not read the page text')}")
                 if not launched:
-                    self.btn_tts_play_pause.setText("▶")
-                    self.btn_tts_play_pause.setToolTip("Play / Resume TTS")
+                    self.btn_tts_play.setIcon(svg_icon("play", "#11111B", 16))
+                    self.btn_tts_play.setToolTip("Play / Resume TTS")
             return
         if prep is None:
             return
@@ -1413,8 +1455,8 @@ class ReaderView(QWidget):
         else:
             if not units:
                 self._tts_prep = None
-                self.btn_tts_play_pause.setText("▶")
-                self.btn_tts_play_pause.setToolTip("Play / Resume TTS")
+                self.btn_tts_play.setIcon(svg_icon("play", "#11111B", 16))
+                self.btn_tts_play.setToolTip("Play / Resume TTS")
                 self._on_tts_status("TTS Warning: No readable text found on this page.")
                 return
             cur_page = prep["start_page"]
@@ -1500,14 +1542,14 @@ class ReaderView(QWidget):
 
     def _on_tts_playback_state_changed(self, state: str):
         if state == "playing":
-            self.btn_tts_play_pause.setText("⏸")
-            self.btn_tts_play_pause.setToolTip("Pause TTS")
+            self.btn_tts_play.setIcon(svg_icon("pause", "#11111B", 16))
+            self.btn_tts_play.setToolTip("Pause TTS")
         elif state == "paused":
-            self.btn_tts_play_pause.setText("▶")
-            self.btn_tts_play_pause.setToolTip("Resume TTS")
+            self.btn_tts_play.setIcon(svg_icon("play", "#11111B", 16))
+            self.btn_tts_play.setToolTip("Resume TTS")
         else:
-            self.btn_tts_play_pause.setText("▶")
-            self.btn_tts_play_pause.setToolTip("Play / Resume TTS")
+            self.btn_tts_play.setIcon(svg_icon("play", "#11111B", 16))
+            self.btn_tts_play.setToolTip("Play / Resume TTS")
             prev_page = self.canvas.active_tts_page
             
             self.canvas.active_tts_page = None
@@ -1565,14 +1607,14 @@ class ReaderView(QWidget):
 
     def _on_tts_state_changed(self, state: str):
         if state == "playing":
-            self.btn_tts_play_pause.setText("⏸")
-            self.btn_tts_play_pause.setToolTip("Pause TTS")
+            self.btn_tts_play.setIcon(svg_icon("pause", "#11111B", 16))
+            self.btn_tts_play.setToolTip("Pause TTS")
         elif state == "paused":
-            self.btn_tts_play_pause.setText("▶")
-            self.btn_tts_play_pause.setToolTip("Resume TTS from paused sentence")
+            self.btn_tts_play.setIcon(svg_icon("play", "#11111B", 16))
+            self.btn_tts_play.setToolTip("Resume TTS from paused sentence")
         else:
-            self.btn_tts_play_pause.setText("▶")
-            self.btn_tts_play_pause.setToolTip("Play / Resume TTS")
+            self.btn_tts_play.setIcon(svg_icon("play", "#11111B", 16))
+            self.btn_tts_play.setToolTip("Play / Resume TTS")
 
     def _on_tts_status(self, msg: str):
         self.lbl_tts_status.setText(msg)
@@ -1611,8 +1653,8 @@ class ReaderView(QWidget):
         
         if prev_page is not None:
             self.canvas.invalidate_page(prev_page)
-        self.btn_tts_play_pause.setText("▶")
-        self.btn_tts_play_pause.setToolTip("Play / Resume TTS")
+        self.btn_tts_play.setIcon(svg_icon("play", "#11111B", 16))
+        self.btn_tts_play.setToolTip("Play / Resume TTS")
     
     def wait_for_workers(self, timeout_ms: int = 4000):
         """Called on app exit: quitting while a QThread is still running aborts the process."""
@@ -1632,7 +1674,7 @@ class ReaderView(QWidget):
 
     # Auto Scrolling
     def _update_follow_button_ui(self, locked: bool):
-        """Updates the visual state of the Lock/Unlock TTS Follow button."""
+        """Updates the visual state of the Lock/Unlock TTS Follow button using vector SVG icons."""
         if not getattr(self, "btn_auto_scroll", None):
             return
         self.btn_auto_scroll.blockSignals(True)
@@ -1641,26 +1683,30 @@ class ReaderView(QWidget):
 
         if locked:
             self.btn_auto_scroll.setText("Follow Locked")
+            self.btn_auto_scroll.setIcon(svg_icon("lock", "#89B4FA", 14))
+            self.btn_auto_scroll.setIconSize(QSize(14, 14))
             self.btn_auto_scroll.setToolTip(
                 "TTS Auto-Follow is LOCKED (Page glides smoothly with speech).\n"
                 "Scrolling manually with your mouse wheel will automatically unlock it."
             )
             self.btn_auto_scroll.setStyleSheet("""
                 QPushButton {
-                    background-color: #313244;
+                    background-color: #252638;
                     color: #89B4FA;
                     border: 1px solid #89B4FA;
                     border-radius: 7px;
-                    padding: 5px 11px;
-                    font-weight: bold;
+                    padding: 5px 12px;
+                    font-weight: 700;
                 }
                 QPushButton:hover {
-                    background-color: #45475A;
+                    background-color: #313244;
                     color: #FFFFFF;
                 }
             """)
         else:
             self.btn_auto_scroll.setText("Follow Unlocked")
+            self.btn_auto_scroll.setIcon(svg_icon("unlock", "#F9E2AF", 14))
+            self.btn_auto_scroll.setIconSize(QSize(14, 14))
             self.btn_auto_scroll.setToolTip(
                 "TTS Auto-Follow is UNLOCKED (Free-scroll mode).\n"
                 "Click to re-lock and smoothly glide back to the active spoken sentence."
@@ -1671,7 +1717,7 @@ class ReaderView(QWidget):
                     color: #F9E2AF;
                     border: 1px solid #F9E2AF;
                     border-radius: 7px;
-                    padding: 5px 11px;
+                    padding: 5px 12px;
                     font-weight: 600;
                 }
                 QPushButton:hover {

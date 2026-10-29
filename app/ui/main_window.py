@@ -1,144 +1,241 @@
 import os
 from pathlib import Path
-from PySide6.QtCore import Qt
+from PySide6.QtCore import Qt, QSize
+from PySide6.QtGui import QKeySequence, QShortcut
 from PySide6.QtWidgets import (
-    QApplication, QMainWindow, QStackedWidget, QToolBar, QPushButton,
-    QLabel, QComboBox, QFileDialog, QMessageBox, QListView, QTreeView,
-    QAbstractItemView, QDialog, QVBoxLayout, QHBoxLayout, QListWidget,
-    QProgressDialog
+    QMainWindow,
+    QWidget,
+    QVBoxLayout,
+    QHBoxLayout,
+    QStackedWidget,
+    QPushButton,
+    QLabel,
+    QComboBox,
+    QFileDialog,
+    QMessageBox,
+    QFrame,
+    QDialog,
+    QFormLayout,
 )
 
-from app.config import THEMES
-from app.core.store import LibraryStore, SUPPORTED_EXTENSIONS
-from app.ui.styles import GLOBAL_STYLESHEET
+from app.config import THEMES, SUPPORTED_EXTENSIONS, GLOBAL_QSS
+from app.core.store import LibraryStore
+from app.ui.icon import get_app_icon, svg_icon
 from app.ui.library_view import LibraryView
 from app.ui.reader_view import ReaderView
 
-from app.ui.dialogs import LookupPopupDialog, BookInfoDialog
-
-
-class MultiFolderImportDialog(QDialog):
-    def __init__(self, parent=None):
-        super().__init__(parent)
-        self.setWindowTitle("Import Books from Folders")
-        self.resize(620, 380)
-        self.folders: list[str] = []
-
-        layout = QVBoxLayout(self)
-        layout.setContentsMargins(16, 16, 16, 16)
-        layout.setSpacing(10)
-
-        info_lbl = QLabel(
-            "Add one or more folders from anywhere on your system.\n"
-            "All PDF, EPUB, FB2, MOBI, CBZ, XPS, and TXT files inside them (including subfolders) will be imported."
-        )
-        info_lbl.setWordWrap(True)
-        info_lbl.setStyleSheet("color: #A6ADC8; font-size: 12px;")
-        layout.addWidget(info_lbl)
-
-        self.folder_list = QListWidget()
-        self.folder_list.setStyleSheet(
-            "QListWidget { background-color: #181825; border: 1px solid #313244; border-radius: 6px; padding: 6px; }"
-        )
-        layout.addWidget(self.folder_list, stretch=1)
-
-        top_btns = QHBoxLayout()
-        btn_add_native = QPushButton("+ Browse & Add Folder")
-        btn_add_native.clicked.connect(self.add_single_folder_native)
-        top_btns.addWidget(btn_add_native)
-
-        btn_add_multi = QPushButton("+ Multi-Select Folders (Ctrl/Shift)")
-        btn_add_multi.clicked.connect(self.add_multiple_folders_qt)
-        top_btns.addWidget(btn_add_multi)
-
-        btn_remove = QPushButton("Remove Selected")
-        btn_remove.clicked.connect(self.remove_selected_folder)
-        top_btns.addWidget(btn_remove)
-
-        top_btns.addStretch(1)
-        layout.addLayout(top_btns)
-
-        bot_btns = QHBoxLayout()
-        bot_btns.addStretch(1)
-
-        btn_cancel = QPushButton("Cancel")
-        btn_cancel.clicked.connect(self.reject)
-        bot_btns.addWidget(btn_cancel)
-
-        self.btn_import = QPushButton("Scan & Import Books (0 folders)")
-        self.btn_import.setEnabled(False)
-        self.btn_import.setStyleSheet(
-            "QPushButton:enabled { background-color: #89B4FA; color: #11111B; font-weight: bold; }"
-        )
-        self.btn_import.clicked.connect(self.accept)
-        bot_btns.addWidget(self.btn_import)
-
-        layout.addLayout(bot_btns)
-
-    def _add_paths(self, paths: list[str]):
-        for p in paths:
-            norm = os.path.abspath(p)
-            if os.path.isdir(norm) and norm not in self.folders:
-                self.folders.append(norm)
-                self.folder_list.addItem(norm)
-        self.btn_import.setEnabled(len(self.folders) > 0)
-        self.btn_import.setText(f"Scan & Import Books ({len(self.folders)} folder(s))")
-
-    def add_single_folder_native(self):
-        folder = QFileDialog.getExistingDirectory(
-            self, "Select Folder to Add", str(Path.home()), QFileDialog.ShowDirsOnly
-        )
-        if folder:
-            self._add_paths([folder])
-
-    def add_multiple_folders_qt(self):
-        dlg = QFileDialog(self, "Hold Ctrl or Shift to Select Multiple Folders", str(Path.home()))
-        dlg.setOption(QFileDialog.DontUseNativeDialog, True)
-        dlg.setFileMode(QFileDialog.Directory)
-        dlg.setOption(QFileDialog.ShowDirsOnly, True)
-
-        folder_views = [
-            *dlg.findChildren(QListView),
-            *dlg.findChildren(QTreeView),
-        ]
-        for view in folder_views:
-            view.setSelectionMode(QAbstractItemView.ExtendedSelection)
-
-        if dlg.exec():
-            self._add_paths(dlg.selectedFiles())
-
-    def remove_selected_folder(self):
-        row = self.folder_list.currentRow()
-        if 0 <= row < len(self.folders):
-            self.folders.pop(row)
-            self.folder_list.takeItem(row)
-            self.btn_import.setEnabled(len(self.folders) > 0)
-            self.btn_import.setText(f"Scan & Import Books ({len(self.folders)} folder(s))")
-
 
 class LocalLibraryWindow(QMainWindow):
-    """Main application window coordinating context-aware toolbar actions."""
+    """Main application window with SVG-powered top navigation bar, Library grid, and Reader view."""
 
     def __init__(self):
         super().__init__()
-        self.setWindowTitle("Linux eBook & PDF Reader")
-        self.resize(1280, 860)
-        self.setStyleSheet(GLOBAL_STYLESHEET)
-
         self.store = LibraryStore()
+
+        self.setWindowTitle("Linux eBook & PDF Reader — LocalLibrary")
+        self.setWindowIcon(get_app_icon())
+        self.resize(1380, 860)
+        self.setMinimumSize(960, 620)
+        self.setStyleSheet(GLOBAL_QSS)
+
+        self._build_ui()
+        self._setup_shortcuts()
+        self.show_library_view()
+
+    def _build_ui(self):
+        central = QWidget()
+        self.setCentralWidget(central)
+        root_layout = QVBoxLayout(central)
+        root_layout.setContentsMargins(0, 0, 0, 0)
+        root_layout.setSpacing(0)
+
+        # ---- Top Navigation & Reader Toolbar ----
+        self.top_bar = QFrame()
+        self.top_bar.setObjectName("TopToolbar")
+        self.top_bar.setFixedHeight(52)
+        self.top_bar.setStyleSheet("""
+            QFrame#TopToolbar {
+                background-color: #181825;
+                border-bottom: 1px solid #2A2B3D;
+            }
+            QFrame#TopToolbar QLabel {
+                color: #9399B2;
+                font-size: 12px;
+                font-weight: 600;
+                background: transparent;
+                border: none;
+            }
+            QFrame#TopToolbar QPushButton {
+                background-color: #1E1E2E;
+                color: #CDD6F4;
+                border: 1px solid #313244;
+                border-radius: 7px;
+                padding: 5px 11px;
+                font-size: 12px;
+                font-weight: 600;
+            }
+            QFrame#TopToolbar QPushButton:hover {
+                background-color: #2A2B3D;
+                border-color: #89B4FA;
+                color: #FFFFFF;
+            }
+            QFrame#TopToolbar QPushButton:pressed {
+                background-color: #313244;
+            }
+        """)
+        tb_layout = QHBoxLayout(self.top_bar)
+        tb_layout.setContentsMargins(16, 6, 16, 6)
+        tb_layout.setSpacing(8)
+
+        # --- Library Mode Controls ---
+        self.btn_add_books = QPushButton("Add Books")
+        self.btn_add_books.setIcon(svg_icon("book_plus", "#89B4FA", 15))
+        self.btn_add_books.setIconSize(QSize(15, 15))
+        self.btn_add_books.setCursor(Qt.PointingHandCursor)
+        self.btn_add_books.setToolTip("Import one or more eBook / PDF files (Ctrl+O)")
+        self.btn_add_books.clicked.connect(self.import_multiple_files_dialog)
+        tb_layout.addWidget(self.btn_add_books)
+
+        self.btn_import_folders = QPushButton("Import Folders")
+        self.btn_import_folders.setIcon(svg_icon("folder_plus", "#A6E3A1", 15))
+        self.btn_import_folders.setIconSize(QSize(15, 15))
+        self.btn_import_folders.setCursor(Qt.PointingHandCursor)
+        self.btn_import_folders.setToolTip("Scan a folder recursively for supported books")
+        self.btn_import_folders.clicked.connect(self.import_multiple_folders_dialog)
+        tb_layout.addWidget(self.btn_import_folders)
+
+        # --- Reader Mode Controls ---
+        self.btn_back_lib = QPushButton("Library Home")
+        self.btn_back_lib.setIcon(svg_icon("home", "#89B4FA", 15))
+        self.btn_back_lib.setIconSize(QSize(15, 15))
+        self.btn_back_lib.setCursor(Qt.PointingHandCursor)
+        self.btn_back_lib.setToolTip("Return to your Library (Esc)")
+        self.btn_back_lib.clicked.connect(self.show_library_view)
+        tb_layout.addWidget(self.btn_back_lib)
+
+        self.sep_1 = self._create_separator()
+        tb_layout.addWidget(self.sep_1)
+
+        self.btn_toggle_sidebar = QPushButton("Sidebar")
+        self.btn_toggle_sidebar.setIcon(svg_icon("sidebar", "#CDD6F4", 15))
+        self.btn_toggle_sidebar.setIconSize(QSize(15, 15))
+        self.btn_toggle_sidebar.setCursor(Qt.PointingHandCursor)
+        self.btn_toggle_sidebar.setToolTip("Show / Hide Contents, Bookmarks & Highlights Sidebar")
+        self.btn_toggle_sidebar.clicked.connect(self._on_toggle_sidebar)
+        tb_layout.addWidget(self.btn_toggle_sidebar)
+
+        self.lbl_view = QLabel("View:")
+        tb_layout.addWidget(self.lbl_view)
+
+        self.combo_view_mode = QComboBox()
+        self.combo_view_mode.addItems(["Continuous Scroll", "Single Page"])
+        saved_view_mode = self.store.settings.get("view_mode", "Continuous Scroll")
+        if saved_view_mode in ("Continuous Scroll", "Single Page"):
+            self.combo_view_mode.setCurrentText(saved_view_mode)
+        self.combo_view_mode.currentTextChanged.connect(self._on_view_mode_changed)
+        tb_layout.addWidget(self.combo_view_mode)
+
+        self.btn_prev_page = QPushButton()
+        self.btn_prev_page.setIcon(svg_icon("chevron_left", "#CDD6F4", 15))
+        self.btn_prev_page.setIconSize(QSize(15, 15))
+        self.btn_prev_page.setFixedSize(30, 30)
+        self.btn_prev_page.setCursor(Qt.PointingHandCursor)
+        self.btn_prev_page.setToolTip("Previous Page (PageUp)")
+        self.btn_prev_page.clicked.connect(lambda: self.reader_view.step_prev_page())
+        tb_layout.addWidget(self.btn_prev_page)
+
+        self.btn_next_page = QPushButton()
+        self.btn_next_page.setIcon(svg_icon("chevron_right", "#CDD6F4", 15))
+        self.btn_next_page.setIconSize(QSize(15, 15))
+        self.btn_next_page.setFixedSize(30, 30)
+        self.btn_next_page.setCursor(Qt.PointingHandCursor)
+        self.btn_next_page.setToolTip("Next Page (PageDown)")
+        self.btn_next_page.clicked.connect(lambda: self.reader_view.step_next_page())
+        tb_layout.addWidget(self.btn_next_page)
+
+        self.lbl_theme = QLabel("Theme:")
+        tb_layout.addWidget(self.lbl_theme)
+
+        self.combo_theme = QComboBox()
+        self.combo_theme.addItems(list(THEMES.keys()))
+        saved_theme = self.store.settings.get("theme_name", "Smart Dark (Mocha)")
+        if saved_theme in THEMES:
+            self.combo_theme.setCurrentText(saved_theme)
+        self.combo_theme.currentTextChanged.connect(self._on_theme_changed)
+        tb_layout.addWidget(self.combo_theme)
+
+        self.btn_zoom_out = QPushButton()
+        self.btn_zoom_out.setIcon(svg_icon("zoom_out", "#CDD6F4", 15))
+        self.btn_zoom_out.setIconSize(QSize(15, 15))
+        self.btn_zoom_out.setFixedSize(32, 30)
+        self.btn_zoom_out.setCursor(Qt.PointingHandCursor)
+        self.btn_zoom_out.setToolTip("Zoom Out (Ctrl+-)")
+        self.btn_zoom_out.clicked.connect(lambda: self.reader_view.zoom_out())
+        tb_layout.addWidget(self.btn_zoom_out)
+
+        self.btn_zoom_in = QPushButton()
+        self.btn_zoom_in.setIcon(svg_icon("zoom_in", "#CDD6F4", 15))
+        self.btn_zoom_in.setIconSize(QSize(15, 15))
+        self.btn_zoom_in.setFixedSize(32, 30)
+        self.btn_zoom_in.setCursor(Qt.PointingHandCursor)
+        self.btn_zoom_in.setToolTip("Zoom In (Ctrl+=)")
+        self.btn_zoom_in.clicked.connect(lambda: self.reader_view.zoom_in())
+        tb_layout.addWidget(self.btn_zoom_in)
+
+        self.btn_bookmark = QPushButton("Bookmark")
+        self.btn_bookmark.setIcon(svg_icon("bookmark", "#F9E2AF", 14))
+        self.btn_bookmark.setIconSize(QSize(14, 14))
+        self.btn_bookmark.setCursor(Qt.PointingHandCursor)
+        self.btn_bookmark.setToolTip("Toggle Bookmark on Current Page (Ctrl+D)")
+        self.btn_bookmark.clicked.connect(lambda: self.reader_view.toggle_bookmark())
+        tb_layout.addWidget(self.btn_bookmark)
+
+        self.btn_find = QPushButton("Find")
+        self.btn_find.setIcon(svg_icon("search", "#CDD6F4", 14))
+        self.btn_find.setIconSize(QSize(14, 14))
+        self.btn_find.setCursor(Qt.PointingHandCursor)
+        self.btn_find.setToolTip("Search Text in Book (Ctrl+F)")
+        self.btn_find.clicked.connect(lambda: self.reader_view.open_search_bar())
+        tb_layout.addWidget(self.btn_find)
+
+        self.btn_info = QPushButton("Info")
+        self.btn_info.setIcon(svg_icon("info", "#89DCEB", 14))
+        self.btn_info.setIconSize(QSize(14, 14))
+        self.btn_info.setCursor(Qt.PointingHandCursor)
+        self.btn_info.setToolTip("View Book Metadata & File Details")
+        self.btn_info.clicked.connect(self._show_book_info_dialog)
+        tb_layout.addWidget(self.btn_info)
+
+        tb_layout.addStretch(1)
+
+        # Page & Zoom Status Badge (Right-aligned in Top Bar)
+        self.lbl_page_status = QLabel("")
+        self.lbl_page_status.setAlignment(Qt.AlignRight | Qt.AlignVCenter)
+        self.lbl_page_status.setStyleSheet("""
+            QLabel {
+                background-color: #1E1E2E;
+                color: #89B4FA;
+                border: 1px solid #313244;
+                border-radius: 12px;
+                padding: 4px 12px;
+                font-size: 12px;
+                font-weight: 700;
+            }
+        """)
+        tb_layout.addWidget(self.lbl_page_status)
+
+        root_layout.addWidget(self.top_bar)
+
+        # ---- Main Stacked Area (0 = LibraryView, 1 = ReaderView) ----
+        self.stack = QStackedWidget()
         self.library_view = LibraryView()
         self.reader_view = ReaderView(self.store)
 
-        self.library_only_actions = []
-        self.reader_only_actions = []
-
-        self._build_toolbar()
-
-        self.stack = QStackedWidget()
         self.stack.addWidget(self.library_view)
         self.stack.addWidget(self.reader_view)
-        self.setCentralWidget(self.stack)
+        root_layout.addWidget(self.stack, stretch=1)
 
+        # Connect LibraryView signals
         self.library_view.book_selected.connect(self.open_book)
         self.library_view.book_remove_requested.connect(self.remove_book_from_library)
         self.library_view.add_books_requested.connect(self.import_multiple_files_dialog)
@@ -147,147 +244,77 @@ class LocalLibraryWindow(QMainWindow):
         self.library_view.rename_folder_requested.connect(self._on_rename_folder)
         self.library_view.delete_folder_requested.connect(self._on_delete_folder)
         self.library_view.move_book_requested.connect(self._on_move_book_to_folder)
-        self.reader_view.status_updated.connect(self.lbl_page_status.setText)
-        self.library_view.change_root_dir_requested.connect(self._on_change_library_root)
 
-        self.show_library_view()
+        # Connect ReaderView signals
+        self.reader_view.status_updated.connect(self._on_reader_status_updated)
+        if hasattr(self.reader_view, "book_closed"):
+            self.reader_view.book_closed.connect(self.show_library_view)
 
-    def _build_toolbar(self):
-        toolbar = QToolBar("Main Toolbar")
-        toolbar.setObjectName("MainToolbar")
-        toolbar.setMovable(False)
-        self.addToolBar(toolbar)
+    @staticmethod
+    def _create_separator() -> QFrame:
+        sep = QFrame()
+        sep.setFrameShape(QFrame.VLine)
+        sep.setFixedWidth(1)
+        sep.setFixedHeight(24)
+        sep.setStyleSheet("background-color: #313244; border: none;")
+        return sep
 
-        # ---- Library-Only Actions (Shown ONLY on Library Home) ----
-        btn_add_files = QPushButton("+ Add Books")
-        btn_add_files.setAccessibleName("Add books")
-        btn_add_files.setToolTip("Select one or multiple eBook/PDF files to import")
-        btn_add_files.clicked.connect(self.import_multiple_files_dialog)
-        act_files = toolbar.addWidget(btn_add_files)
+    def _setup_shortcuts(self):
+        QShortcut(QKeySequence("Ctrl+O"), self, activated=self.import_multiple_files_dialog)
+        QShortcut(QKeySequence("Ctrl+F"), self, activated=self._shortcut_find)
+        QShortcut(QKeySequence("Ctrl+D"), self, activated=self._shortcut_bookmark)
+        QShortcut(QKeySequence("Ctrl+="), self, activated=lambda: self.reader_view.zoom_in())
+        QShortcut(QKeySequence("Ctrl++"), self, activated=lambda: self.reader_view.zoom_in())
+        QShortcut(QKeySequence("Ctrl+-"), self, activated=lambda: self.reader_view.zoom_out())
+        QShortcut(QKeySequence("Escape"), self, activated=self._shortcut_escape)
 
-        btn_add_folders = QPushButton("+ Import Folders")
-        btn_add_folders.setAccessibleName("Import folders")
-        btn_add_folders.setToolTip("Import all supported books from one or multiple folders")
-        btn_add_folders.clicked.connect(self.import_multiple_folders_dialog)
-        act_folders = toolbar.addWidget(btn_add_folders)
+    def _shortcut_find(self):
+        if self.stack.currentIndex() == 1:
+            self.reader_view.open_search_bar()
 
-        sep1 = toolbar.addSeparator()
+    def _shortcut_bookmark(self):
+        if self.stack.currentIndex() == 1:
+            self.reader_view.toggle_bookmark()
 
-        self.library_only_actions = [act_files, act_folders, sep1]
+    def _shortcut_escape(self):
+        if self.stack.currentIndex() == 1:
+            if hasattr(self.reader_view, "search_bar") and self.reader_view.search_bar.isVisible():
+                self.reader_view.search_bar.hide()
+                self.reader_view.canvas.set_search_query("")
+            else:
+                self.show_library_view()
 
-        # ---- Reader-Only Actions (Shown ONLY when reading a book) ----
-        btn_home = QPushButton("Library Home")
-        btn_home.setAccessibleName("Return to library")
-        btn_home.setToolTip("Close current book and return to Library Home")
-        btn_home.clicked.connect(self.show_library_view)
-        act_home = toolbar.addWidget(btn_home)
-
-        sep2 = toolbar.addSeparator()
-
-        btn_sidebar = QPushButton("Sidebar")
-        btn_sidebar.setAccessibleName("Toggle reader sidebar")
-        btn_sidebar.setToolTip("Toggle Contents / Bookmarks / Highlights / Search Sidebar")
-        btn_sidebar.clicked.connect(self.reader_view.toggle_sidebar)
-        act_sidebar = toolbar.addWidget(btn_sidebar)
-
-        lbl_view = QLabel("  View:")
-        act_lbl_view = toolbar.addWidget(lbl_view)
-
-        self.combo_view_mode = QComboBox()
-        self.combo_view_mode.addItems([
-            "Continuous Scroll",
-            "Single Page",
-            "Two-Column Spread",
-        ])
-        self.combo_view_mode.setAccessibleName("Reader view mode")
-        self.combo_view_mode.setToolTip("Switch between Continuous, Single, and Two-Column Spread")
-        self.combo_view_mode.currentTextChanged.connect(self.reader_view.set_view_mode)
-        act_view_mode = toolbar.addWidget(self.combo_view_mode)
-
-        btn_prev_page = QPushButton("◀")
-        btn_prev_page.setAccessibleName("Previous page or spread")
-        btn_prev_page.setToolTip("Previous Page / Spread (Left Arrow / PageUp)")
-        btn_prev_page.setFixedWidth(34)
-        btn_prev_page.clicked.connect(self.reader_view.step_prev_page)
-        act_prev_p = toolbar.addWidget(btn_prev_page)
-
-        btn_next_page = QPushButton("▶")
-        btn_next_page.setAccessibleName("Next page or spread")
-        btn_next_page.setToolTip("Next Page / Spread (Right Arrow / PageDown / Space)")
-        btn_next_page.setFixedWidth(34)
-        btn_next_page.clicked.connect(self.reader_view.step_next_page)
-        act_next_p = toolbar.addWidget(btn_next_page)
-
-        lbl_theme = QLabel("  Theme:")
-        act_lbl_theme = toolbar.addWidget(lbl_theme)
-
-        self.combo_theme = QComboBox()
-        self.combo_theme.setAccessibleName("Reader theme")
-        self.combo_theme.addItems(list(THEMES.keys()))
-        self.combo_theme.setCurrentText(self.reader_view.theme_name)
-        self.combo_theme.currentTextChanged.connect(self.reader_view.set_theme)
-        act_theme = toolbar.addWidget(self.combo_theme)
-
-        btn_zoom_out = QPushButton("A-")
-        btn_zoom_out.setAccessibleName("Zoom out")
-        btn_zoom_out.setToolTip("Zoom Out")
-        btn_zoom_out.clicked.connect(lambda: self.reader_view.adjust_zoom(-0.15))
-        act_zout = toolbar.addWidget(btn_zoom_out)
-
-        btn_zoom_in = QPushButton("A+")
-        btn_zoom_in.setAccessibleName("Zoom in")
-        btn_zoom_in.setToolTip("Zoom In")
-        btn_zoom_in.clicked.connect(lambda: self.reader_view.adjust_zoom(+0.15))
-        act_zin = toolbar.addWidget(btn_zoom_in)
-
-        btn_bookmark = QPushButton("Bookmark")
-        btn_bookmark.setAccessibleName("Toggle bookmark")
-        btn_bookmark.setToolTip("Toggle Bookmark on Current Page")
-        btn_bookmark.clicked.connect(self.reader_view.toggle_bookmark)
-        act_bm = toolbar.addWidget(btn_bookmark)
-
-        btn_find = QPushButton("Find (Ctrl+F)")
-        btn_find.setAccessibleName("Find in book")
-        btn_find.setToolTip("Search text inside the book (Ctrl+F)")
-        btn_find.clicked.connect(self.reader_view.open_search_bar)
-        act_find = toolbar.addWidget(btn_find)
-
-        btn_info = QPushButton("Info")
-        btn_info.setAccessibleName("Book information")
-        btn_info.setToolTip("View Reading Statistics & Book Metadata")
-        btn_info.clicked.connect(self.reader_view.open_book_info_dialog)
-        act_info = toolbar.addWidget(btn_info)
-
-        self.lbl_page_status = QLabel("")
-        self.lbl_page_status.setObjectName("PageStatus")
-        self.lbl_page_status.setAccessibleName("Current page and zoom status")
-        self.lbl_page_status.setAlignment(Qt.AlignCenter)
-        self.lbl_page_status.setMinimumWidth(170)
-        act_status = toolbar.addWidget(self.lbl_page_status)
-
-        self.reader_only_actions = [
-            act_home, sep2, act_sidebar, act_lbl_view, act_view_mode, act_prev_p, act_next_p,
-            act_lbl_theme, act_theme, act_zout, act_zin, act_bm, act_find, act_info, act_status,
-        ]
+    # ---- TOOLBAR VISIBILITY & STATUS UPDATES ----
 
     def _set_library_controls_visible(self, visible: bool):
-        for act in self.library_only_actions:
-            act.setVisible(visible)
+        self.btn_add_books.setVisible(visible)
+        self.btn_import_folders.setVisible(visible)
 
     def _set_reader_controls_visible(self, visible: bool):
-        for act in self.reader_only_actions:
-            act.setVisible(visible)
-            self.lbl_page_status.setVisible(visible)
+        for w in (
+            self.btn_back_lib,
+            self.sep_1,
+            self.btn_toggle_sidebar,
+            self.lbl_view,
+            self.combo_view_mode,
+            self.btn_prev_page,
+            self.btn_next_page,
+            self.lbl_theme,
+            self.combo_theme,
+            self.btn_zoom_out,
+            self.btn_zoom_in,
+            self.btn_bookmark,
+            self.btn_find,
+            self.btn_info,
+            self.lbl_page_status,
+        ):
+            w.setVisible(visible)
 
-    def show_library_view(self):
-        self.reader_view.close_book()
-        self.lbl_page_status.setText("")
-        self._set_reader_controls_visible(False)
-        self._set_library_controls_visible(True)
-        self.setWindowTitle("Linux eBook & PDF Reader")
-        self.store.refresh_epub_covers_once()
-        self._refresh_library_grid()
-        self.stack.setCurrentIndex(0)
+    def _on_reader_status_updated(self, text: str):
+        self.lbl_page_status.setText(text)
+        self.lbl_page_status.setVisible(bool(text.strip()) and self.stack.currentIndex() == 1)
+
+    # ---- VIEW SWITCHING ----
 
     def _refresh_library_grid(self):
         self.library_view.populate(
@@ -295,139 +322,194 @@ class LocalLibraryWindow(QMainWindow):
             self.width(),
             folders=self.store.get_folders(),
         )
-    
+
+    def show_library_view(self):
+        self.reader_view.close_book()
+        self.lbl_page_status.setText("")
+        self._set_reader_controls_visible(False)
+        self._set_library_controls_visible(True)
+        self.setWindowTitle("Linux eBook & PDF Reader — LocalLibrary")
+        if hasattr(self.store, "refresh_epub_covers_once"):
+            self.store.refresh_epub_covers_once()
+        self._refresh_library_grid()
+        self.stack.setCurrentIndex(0)
+
+    def open_book(self, filepath: str):
+        if not filepath or not os.path.exists(filepath):
+            QMessageBox.warning(
+                self,
+                "File Not Found",
+                f"The selected book file could not be found on disk:\n{filepath}",
+            )
+            return
+
+        self._set_library_controls_visible(False)
+        self._set_reader_controls_visible(True)
+
+        # Apply saved theme & view mode before loading
+        self.reader_view.set_theme(self.combo_theme.currentText())
+        self.reader_view.set_view_mode(self.combo_view_mode.currentText())
+
+        self.stack.setCurrentIndex(1)
+        self.reader_view.load_book(filepath)
+        if hasattr(self.reader_view, "_emit_status"):
+            self.reader_view._emit_status()
+
+        book_info = self.store.books.get(filepath) or {}
+        title = book_info.get("title") or Path(filepath).stem
+        self.setWindowTitle(f"{title} — LocalLibrary")
+
+    # ---- READER TOOLBAR ACTIONS ----
+
+    def _on_toggle_sidebar(self):
+        if hasattr(self.reader_view, "toggle_sidebar"):
+            self.reader_view.toggle_sidebar()
+        elif hasattr(self.reader_view, "sidebar_tabs"):
+            vis = self.reader_view.sidebar_tabs.isVisible()
+            self.reader_view.sidebar_tabs.setVisible(not vis)
+
+    def _on_view_mode_changed(self, mode_text: str):
+        self.store.save_settings(view_mode=mode_text)
+        self.reader_view.set_view_mode(mode_text)
+
+    def _on_theme_changed(self, theme_name: str):
+        self.store.save_settings(theme_name=theme_name)
+        self.reader_view.set_theme(theme_name)
+
+    def _show_book_info_dialog(self):
+        if hasattr(self.reader_view, "show_book_info"):
+            self.reader_view.show_book_info()
+            return
+
+        book = getattr(self.reader_view, "current_book", None)
+        if not book:
+            return
+
+        dlg = QDialog(self)
+        dlg.setWindowTitle("Book Metadata & File Information")
+        dlg.setMinimumWidth(460)
+        dlg.setStyleSheet("""
+            QDialog { background-color: #181825; color: #CDD6F4; }
+            QLabel { color: #CDD6F4; font-size: 13px; }
+        """)
+        form = QFormLayout(dlg)
+        form.setContentsMargins(20, 20, 20, 20)
+        form.setSpacing(10)
+
+        path_str = book.get("path", "")
+        size_mb = (
+            f"{os.path.getsize(path_str) / (1024 * 1024):.2f} MB"
+            if path_str and os.path.exists(path_str)
+            else "Unknown"
+        )
+        cur = book.get("current_page", 0) + 1
+        tot = max(1, book.get("total_pages", 1))
+
+        fields = [
+            ("Title:", book.get("title", "Untitled")),
+            ("Author:", book.get("author", "Unknown Author")),
+            ("Category:", book.get("category") or "Uncategorized"),
+            ("Format:", book.get("format", "Unknown")),
+            ("Progress:", f"Page {cur} of {tot} ({int((cur / tot) * 100)}%)"),
+            ("File Size:", size_mb),
+            ("Location:", path_str),
+        ]
+        for label_txt, val_txt in fields:
+            lbl_k = QLabel(label_txt)
+            lbl_k.setStyleSheet("color: #89B4FA; font-weight: 700;")
+            lbl_v = QLabel(str(val_txt))
+            lbl_v.setWordWrap(True)
+            lbl_v.setTextInteractionFlags(Qt.TextSelectableByMouse)
+            form.addRow(lbl_k, lbl_v)
+
+        dlg.exec()
+
+    # ---- VIRTUAL CATEGORY HANDLERS ----
+
     def _on_create_folder(self, folder_name: str):
         ok, msg = self.store.create_folder(folder_name)
         if not ok:
-            QMessageBox.warning(self, "Folder Error", msg)
+            QMessageBox.warning(self, "Category Error", msg)
         self._refresh_library_grid()
 
     def _on_rename_folder(self, old_name: str, new_name: str):
         ok, msg = self.store.rename_folder(old_name, new_name)
         if not ok:
-            QMessageBox.warning(self, "Rename Folder Error", msg)
+            QMessageBox.warning(self, "Rename Error", msg)
         self._refresh_library_grid()
 
     def _on_delete_folder(self, folder_name: str):
         ok, msg = self.store.delete_folder(folder_name)
         if not ok:
-            QMessageBox.warning(self, "Delete Folder Error", msg)
+            QMessageBox.warning(self, "Delete Error", msg)
         self._refresh_library_grid()
 
     def _on_move_book_to_folder(self, book_path: str, folder_name: str):
         ok, msg = self.store.move_book_to_folder(book_path, folder_name)
         if not ok:
-            QMessageBox.warning(self, "Move Book Error", msg)
+            QMessageBox.warning(self, "Category Error", msg)
         self._refresh_library_grid()
 
-    def _on_change_library_root(self, new_root: str):
-        self.store.set_library_root(new_root)
-        self._refresh_library_grid()
+    # ---- BOOK IMPORT & REMOVAL DIALOGS ----
 
     def import_multiple_files_dialog(self):
-        paths, _ = QFileDialog.getOpenFileNames(
+        exts = " ".join(f"*{ext}" for ext in sorted(SUPPORTED_EXTENSIONS))
+        files, _ = QFileDialog.getOpenFileNames(
             self,
-            "Select Books to Import",
+            "Add eBooks & PDFs to Library",
             str(Path.home()),
-            "eBooks & Documents (*.pdf *.epub *.fb2 *.mobi *.cbz *.xps *.txt)",
+            f"Supported Books ({exts});;All Files (*)",
         )
-        if not paths:
+        if not files:
             return
-
-        import_result = self._batch_import_files(paths)
-        if len(paths) == 1 and not self._last_import_cancelled:
-            self.open_book(paths[0])
-        else:
-            self.show_library_view()
-            self._show_import_summary(import_result, "File Import")
+        added = 0
+        for fpath in files:
+            if Path(fpath).suffix.lower() in SUPPORTED_EXTENSIONS:
+                self.store.add_or_update_book(fpath)
+                added += 1
+        if added:
+            self._refresh_library_grid()
 
     def import_multiple_folders_dialog(self):
-        dlg = MultiFolderImportDialog(self)
-        if not dlg.exec() or not dlg.folders:
+        folder = QFileDialog.getExistingDirectory(
+            self,
+            "Select Folder to Scan for Books",
+            str(Path.home()),
+        )
+        if not folder:
             return
 
-        found_files: list[str] = []
-        seen: set[str] = set()
-        for folder in dlg.folders:
-            for root_dir, _dirs, files in os.walk(folder, followlinks=True):
-                for fname in files:
-                    if Path(fname).suffix.lower() in SUPPORTED_EXTENSIONS:
-                        full_path = os.path.abspath(os.path.join(root_dir, fname))
-                        if full_path not in seen:
-                            seen.add(full_path)
-                            found_files.append(full_path)
+        added = 0
+        for root, _dirs, files in os.walk(folder):
+            for fname in files:
+                if Path(fname).suffix.lower() in SUPPORTED_EXTENSIONS:
+                    full_path = os.path.join(root, fname)
+                    self.store.add_or_update_book(full_path)
+                    added += 1
 
-        if not found_files:
-            QMessageBox.information(
-                self,
-                "No Supported Books Found",
-                "No supported eBook or document files were found in the selected folder(s).",
-            )
-            return
-
-        import_result = self._batch_import_files(found_files)
-        self.show_library_view()
-        self._show_import_summary(import_result, "Folder Import")
-
-    def _show_import_summary(self, result: dict[str, int], source: str):
-        status = "cancelled" if self._last_import_cancelled else "complete"
+        self._refresh_library_grid()
         QMessageBox.information(
             self,
-            f"{source} {status.title()}",
-            (
-                f"Added: {result['added']}\n"
-                f"Updated: {result['updated']}\n"
-                f"Skipped or failed: {result['failed']}"
-            ),
+            "Folder Import Complete",
+            f"Scanned '{folder}' and imported/updated {added} book(s).",
         )
-
-    def _batch_import_files(self, filepaths: list[str]) -> dict[str, int]:
-        progress = QProgressDialog("Importing books into library...", "Cancel", 0, len(filepaths), self)
-        progress.setWindowTitle("Importing Books")
-        progress.setWindowModality(Qt.WindowModal)
-        progress.setMinimumDuration(0)
-        self._last_import_cancelled = False
-
-        result = {"added": 0, "updated": 0, "failed": 0}
-        for idx, fpath in enumerate(filepaths):
-            if progress.wasCanceled():
-                self._last_import_cancelled = True
-                break
-            progress.setLabelText(f"Importing ({idx + 1}/{len(filepaths)}):\n{Path(fpath).name}")
-            progress.setValue(idx)
-            QApplication.processEvents()
-            book_id = self.store.book_id(fpath)
-            existed = book_id in self.store.books
-            if self.store.add_or_update_book(fpath):
-                result["updated" if existed else "added"] += 1
-            else:
-                result["failed"] += 1
-
-        progress.setValue(len(filepaths))
-        return result
 
     def remove_book_from_library(self, filepath: str):
-        self.store.remove_book(filepath)
-        self._refresh_library_grid()
-
-    def open_book(self, filepath: str):
-        if not os.path.exists(filepath):
-            QMessageBox.warning(self, "File Not Found", f"Could not find:\n{filepath}")
-            return
-        self._set_library_controls_visible(False)
-        self._set_reader_controls_visible(True)
-        self.reader_view.load_book(filepath)
-        self.reader_view._emit_status()
-        self.stack.setCurrentIndex(1)
-        
-        book_title = (
-            self.reader_view.current_book.get("title", "Book")
-            if self.reader_view.current_book
-            else "Book"
+        book = self.store.books.get(filepath) or {}
+        title = book.get("title") or Path(filepath).name
+        reply = QMessageBox.question(
+            self,
+            "Remove Book from Library",
+            f"Remove '{title}' from your LocalLibrary list?\n\n"
+            "(The actual file on your computer will not be deleted.)",
+            QMessageBox.Yes | QMessageBox.No,
+            QMessageBox.No,
         )
-        self.setWindowTitle(f"{book_title}")
+        if reply == QMessageBox.Yes:
+            self.store.remove_book(filepath)
+            self._refresh_library_grid()
 
     def closeEvent(self, event):
         self.reader_view.close_book()
         self.store.save()
-        event.accept()
+        super().closeEvent(event)

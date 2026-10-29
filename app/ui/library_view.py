@@ -1,7 +1,7 @@
 import os
 from pathlib import Path
-from PySide6.QtCore import Qt, Signal, QTimer, QPoint, QUrl
-from PySide6.QtGui import QFont, QDesktopServices, QKeySequence, QShortcut
+from PySide6.QtCore import Qt, Signal, QTimer, QPoint, QUrl, QSize
+from PySide6.QtGui import QFont, QDesktopServices, QAction
 from PySide6.QtWidgets import (
     QWidget, QVBoxLayout, QHBoxLayout, QLabel, QLineEdit,
     QComboBox, QScrollArea, QGridLayout, QFrame, QPushButton,
@@ -9,32 +9,31 @@ from PySide6.QtWidgets import (
 )
 
 from app.ui.widgets import BookCardWidget
-from app.ui.icon import _load_clean_pixmap
+from app.ui.icon import _load_clean_pixmap, svg_icon, svg_pixmap
 
 
 class LibraryView(QWidget):
-    """Responsive Library Home view with virtual Folder/Category management, search bar, and centered grid."""
+    """Responsive Library Home view with SVG-based virtual Category management, search bar, and grid."""
 
     book_selected = Signal(str)
     book_remove_requested = Signal(str)
     add_books_requested = Signal()
     import_folders_requested = Signal()
 
-    # Virtual Folder / Category signals
     create_folder_requested = Signal(str)
     rename_folder_requested = Signal(str, str)
     delete_folder_requested = Signal(str)
     move_book_requested = Signal(str, str)
-    change_root_dir_requested = Signal(str)  # Kept for signal backward-compatibility if connected in main_window
+    change_root_dir_requested = Signal(str)
 
-    CARD_WIDTH = 215
+    CARD_WIDTH = 218
     GRID_SPACING = 18
 
     def __init__(self):
         super().__init__()
         self._books_cache: dict = {}
         self._folders_list: list[str] = []
-        self._active_folder: str = "__ALL__"  # "__ALL__", "__UNCAT__", or category name
+        self._active_folder: str = "__ALL__"
         self._last_cols: int = 0
         self._fallback_width: int = 1280
         self._build_ui()
@@ -57,14 +56,14 @@ class LibraryView(QWidget):
         title_col.setSpacing(4)
 
         header = QLabel("Your Reading Library")
-        header.setFont(QFont("Sans Serif", 20, QFont.Bold))
+        header.setFont(QFont("Inter", 20, QFont.Bold))
         header.setStyleSheet("color: #CDD6F4; background: transparent;")
         title_col.addWidget(header)
 
         sub = QLabel(
-            "Supports PDF, EPUB, FB2, MOBI, CBZ, and TXT with custom categories & automatic progress tracking."
+            "Supports PDF, EPUB, FB2, MOBI, CBZ, and TXT with virtual collections & automatic progress tracking."
         )
-        sub.setStyleSheet("color: #A6ADC8; font-size: 13px; background: transparent;")
+        sub.setStyleSheet("color: #9399B2; font-size: 13px; background: transparent;")
         title_col.addWidget(sub)
 
         header_row.addLayout(title_col)
@@ -73,13 +72,14 @@ class LibraryView(QWidget):
         self.lbl_count = QLabel("0 books")
         self.lbl_count.setAlignment(Qt.AlignRight | Qt.AlignBottom)
         self.lbl_count.setStyleSheet(
-            "color: #89B4FA; font-size: 13px; font-weight: bold; background: transparent;"
+            "background-color: #1E1E2E; color: #89B4FA; font-size: 12px; "
+            "font-weight: 700; padding: 5px 12px; border-radius: 12px; border: 1px solid #313244;"
         )
         header_row.addWidget(self.lbl_count, alignment=Qt.AlignBottom)
 
         root_layout.addWidget(header_widget)
 
-        # ---- 2. Fixed-Height Search, Filter & Sort Bar ----
+        # ---- 2. Search, Filter & Sort Bar ----
         filter_bar = QFrame()
         filter_bar.setObjectName("FilterBar")
         filter_bar.setFixedHeight(54)
@@ -87,13 +87,13 @@ class LibraryView(QWidget):
         filter_bar.setStyleSheet("""
             QFrame#FilterBar {
                 background-color: #181825;
-                border: 1px solid #313244;
+                border: 1px solid #2A2B3D;
                 border-radius: 10px;
             }
             QFrame#FilterBar QLabel {
                 background: transparent;
                 border: none;
-                color: #A6ADC8;
+                color: #9399B2;
                 font-size: 12px;
                 font-weight: 600;
                 padding-left: 4px;
@@ -101,24 +101,13 @@ class LibraryView(QWidget):
             QFrame#FilterBar QLineEdit {
                 background-color: #11111B;
                 color: #CDD6F4;
-                border: 1px solid #45475A;
-                border-radius: 6px;
+                border: 1px solid #313244;
+                border-radius: 7px;
                 padding: 6px 12px;
                 font-size: 13px;
             }
             QFrame#FilterBar QLineEdit:focus {
                 border: 1px solid #89B4FA;
-            }
-            QFrame#FilterBar QComboBox {
-                background-color: #1E1E2E;
-                color: #CDD6F4;
-                border: 1px solid #45475A;
-                border-radius: 6px;
-                padding: 5px 10px;
-                font-size: 12px;
-            }
-            QFrame#FilterBar QComboBox:hover {
-                border-color: #89B4FA;
             }
         """)
         fb_layout = QHBoxLayout(filter_bar)
@@ -126,32 +115,26 @@ class LibraryView(QWidget):
         fb_layout.setSpacing(10)
 
         self.search_input = QLineEdit()
-        self.search_input.setAccessibleName("Library search")
-        self.search_input.setToolTip("Search titles, authors, and categories (Ctrl+L)")
-        self.search_input.setPlaceholderText("Search titles, authors, or categories…")
+        self.search_input.setPlaceholderText("Search by title, author, or category...")
+        self.search_input.addAction(svg_icon("search", "#6C7086", 15), QLineEdit.LeadingPosition)
         self.search_input.setClearButtonEnabled(True)
         self.search_input.textChanged.connect(self._on_filters_changed)
         fb_layout.addWidget(self.search_input, stretch=1)
-        self.shortcut_search = QShortcut(QKeySequence("Ctrl+L"), self)
-        self.shortcut_search.activated.connect(self._focus_library_search)
 
         fb_layout.addWidget(QLabel("Format:"))
         self.combo_format = QComboBox()
-        self.combo_format.setAccessibleName("Format filter")
         self.combo_format.addItems(["All Formats", "PDF", "EPUB", "MOBI", "FB2", "CBZ", "TXT"])
         self.combo_format.currentTextChanged.connect(self._on_filters_changed)
         fb_layout.addWidget(self.combo_format)
 
         fb_layout.addWidget(QLabel("Status:"))
         self.combo_status = QComboBox()
-        self.combo_status.setAccessibleName("Reading status filter")
         self.combo_status.addItems(["All Status", "Reading", "Unread", "Completed"])
         self.combo_status.currentTextChanged.connect(self._on_filters_changed)
         fb_layout.addWidget(self.combo_status)
 
         fb_layout.addWidget(QLabel("Sort by:"))
         self.combo_sort = QComboBox()
-        self.combo_sort.setAccessibleName("Library sort order")
         self.combo_sort.addItems([
             "Recently Opened",
             "Title (A–Z)",
@@ -163,7 +146,7 @@ class LibraryView(QWidget):
 
         root_layout.addWidget(filter_bar)
 
-        # ---- 3. Interactive Virtual Folder / Category Bar ----
+        # ---- 3. Interactive Virtual Category Bar (SVG Icons, No Emojis) ----
         folder_bar = QFrame()
         folder_bar.setObjectName("FolderBar")
         folder_bar.setFixedHeight(48)
@@ -171,7 +154,7 @@ class LibraryView(QWidget):
         folder_bar.setStyleSheet("""
             QFrame#FolderBar {
                 background-color: #181825;
-                border: 1px solid #313244;
+                border: 1px solid #2A2B3D;
                 border-radius: 10px;
             }
             QFrame#FolderBar QLabel {
@@ -179,14 +162,17 @@ class LibraryView(QWidget):
                 border: none;
                 color: #F9E2AF;
                 font-size: 12px;
-                font-weight: bold;
+                font-weight: 700;
             }
         """)
         fbar_layout = QHBoxLayout(folder_bar)
-        fbar_layout.setContentsMargins(12, 6, 12, 6)
+        fbar_layout.setContentsMargins(14, 6, 14, 6)
         fbar_layout.setSpacing(8)
 
-        fbar_layout.addWidget(QLabel("📁 Categories:"))
+        cat_icon_lbl = QLabel()
+        cat_icon_lbl.setPixmap(svg_pixmap("layers", "#F9E2AF", 15))
+        fbar_layout.addWidget(cat_icon_lbl)
+        fbar_layout.addWidget(QLabel("Categories:"))
 
         self.pills_scroll = QScrollArea()
         self.pills_scroll.setWidgetResizable(True)
@@ -207,39 +193,44 @@ class LibraryView(QWidget):
             QPushButton {
                 background-color: #1E1E2E;
                 color: #CDD6F4;
-                border: 1px solid #45475A;
-                border-radius: 6px;
-                padding: 4px 10px;
+                border: 1px solid #313244;
+                border-radius: 7px;
+                padding: 5px 11px;
                 font-size: 11px;
                 font-weight: 600;
             }
             QPushButton:hover {
-                background-color: #313244;
+                background-color: #2A2B3D;
                 border-color: #89B4FA;
                 color: #FFFFFF;
             }
             QPushButton:disabled {
                 color: #585B70;
-                border-color: #313244;
+                border-color: #232436;
             }
         """
 
-        self.btn_new_folder = QPushButton("+ New Folder")
-        self.btn_new_folder.setAccessibleName("Create new folder")
+        self.btn_new_folder = QPushButton("New Category")
+        self.btn_new_folder.setIcon(svg_icon("folder_plus", "#89B4FA", 14))
+        self.btn_new_folder.setIconSize(QSize(14, 14))
         self.btn_new_folder.setCursor(Qt.PointingHandCursor)
-        self.btn_new_folder.setToolTip("Create a new virtual category/folder to group your books")
+        self.btn_new_folder.setToolTip("Create a new virtual category to organize your books")
         self.btn_new_folder.setStyleSheet(action_btn_style)
         self.btn_new_folder.clicked.connect(self._prompt_create_folder)
         fbar_layout.addWidget(self.btn_new_folder)
 
-        self.btn_rename_folder = QPushButton("✎ Rename")
+        self.btn_rename_folder = QPushButton("Rename")
+        self.btn_rename_folder.setIcon(svg_icon("edit", "#CDD6F4", 13))
+        self.btn_rename_folder.setIconSize(QSize(13, 13))
         self.btn_rename_folder.setCursor(Qt.PointingHandCursor)
-        self.btn_rename_folder.setToolTip("Rename the currently selected category/folder")
+        self.btn_rename_folder.setToolTip("Rename the active category")
         self.btn_rename_folder.setStyleSheet(action_btn_style)
         self.btn_rename_folder.clicked.connect(self._prompt_rename_folder)
         fbar_layout.addWidget(self.btn_rename_folder)
 
-        self.btn_delete_folder = QPushButton("🗑 Delete")
+        self.btn_delete_folder = QPushButton("Delete")
+        self.btn_delete_folder.setIcon(svg_icon("trash", "#F38BA8", 13))
+        self.btn_delete_folder.setIconSize(QSize(13, 13))
         self.btn_delete_folder.setCursor(Qt.PointingHandCursor)
         self.btn_delete_folder.setToolTip(
             "Delete the selected category (books stay in your library as Uncategorized)"
@@ -265,10 +256,6 @@ class LibraryView(QWidget):
 
         self.scroll.setWidget(self.grid_container)
         root_layout.addWidget(self.scroll, stretch=1)
-
-    def _focus_library_search(self):
-        self.search_input.setFocus()
-        self.search_input.selectAll()
 
     # ---- VIRTUAL CATEGORY PILLS & CRUD DIALOGS ----
 
@@ -309,16 +296,20 @@ class LibraryView(QWidget):
             self._active_folder = "__ALL__"
 
         pills_spec = [
-            ("__ALL__", f"All Books ({total_books})"),
-            ("__UNCAT__", f"Uncategorized ({uncat_count})"),
+            ("__ALL__", f"All Books ({total_books})", None),
+            ("__UNCAT__", f"Uncategorized ({uncat_count})", None),
         ]
         for f_name in self._folders_list:
-            pills_spec.append((f_name, f"📁 {f_name} ({folder_counts.get(f_name, 0)})"))
+            pills_spec.append((f_name, f"{f_name} ({folder_counts.get(f_name, 0)})", "folder"))
 
-        for key, label in pills_spec:
+        for key, label, icon_name in pills_spec:
             btn = QPushButton(label)
             btn.setCursor(Qt.PointingHandCursor)
             is_active = key == self._active_folder
+            if icon_name:
+                btn.setIcon(svg_icon(icon_name, "#11111B" if is_active else "#F9E2AF", 13))
+                btn.setIconSize(QSize(13, 13))
+
             if is_active:
                 btn.setStyleSheet("""
                     QPushButton {
@@ -328,7 +319,7 @@ class LibraryView(QWidget):
                         border-radius: 13px;
                         padding: 4px 12px;
                         font-size: 11px;
-                        font-weight: bold;
+                        font-weight: 700;
                     }
                 """)
             else:
@@ -363,7 +354,7 @@ class LibraryView(QWidget):
     def _prompt_create_folder(self):
         name, ok = QInputDialog.getText(
             self,
-            "New Category / Folder",
+            "New Category",
             "Enter a name for the new category (e.g. AI Agents, Networking, Math):",
         )
         if ok and name.strip():
@@ -409,7 +400,7 @@ class LibraryView(QWidget):
             self,
             "Delete Category",
             f"Delete category '{folder_name}'?\n\n"
-            f"(Your book files will not be touched; books in '{folder_name}' will simply return to Uncategorized.)",
+            f"(Your book files will not be touched; books in '{folder_name}' will return to Uncategorized.)",
             QMessageBox.Yes | QMessageBox.No,
             QMessageBox.No,
         )
@@ -471,18 +462,18 @@ class LibraryView(QWidget):
             QMenu {
                 background-color: #1E1E2E;
                 color: #CDD6F4;
-                border: 1px solid #89B4FA;
+                border: 1px solid #45475A;
                 border-radius: 8px;
                 padding: 6px;
             }
             QMenu::item {
-                padding: 6px 18px;
+                padding: 6px 16px;
                 border-radius: 5px;
             }
             QMenu::item:selected {
                 background-color: #313244;
                 color: #89B4FA;
-                font-weight: bold;
+                font-weight: 600;
             }
             QMenu::separator {
                 height: 1px;
@@ -491,38 +482,61 @@ class LibraryView(QWidget):
             }
         """)
 
-        header_act = menu.addAction(f"📂 Category: {cur_cat or 'Uncategorized'}")
+        header_act = QAction(svg_icon("folder_open", "#F9E2AF", 14), f"Current: {cur_cat or 'Uncategorized'}", menu)
         header_act.setEnabled(False)
+        menu.addAction(header_act)
         menu.addSeparator()
 
         for f_name in self._folders_list:
-            prefix = "✔ " if f_name == cur_cat else "📁 "
-            act = menu.addAction(f"{prefix}Add to '{f_name}'")
-            if f_name == cur_cat:
+            is_cur = f_name == cur_cat
+            ic = svg_icon("check", "#A6E3A1", 14) if is_cur else svg_icon("folder", "#89B4FA", 14)
+            act = QAction(ic, f"Assign to '{f_name}'", menu)
+            if is_cur:
                 act.setEnabled(False)
             else:
                 act.triggered.connect(
                     lambda _chk=False, bp=book_path, fn=f_name: self._execute_move_book(bp, fn)
                 )
+            menu.addAction(act)
 
         if cur_cat:
-            act_uncat = menu.addAction("↩ Remove from Category (Uncategorized)")
+            act_uncat = QAction(
+                svg_icon("undo", "#FAB387", 14),
+                "Remove from Category (Uncategorized)",
+                menu,
+            )
             act_uncat.triggered.connect(
                 lambda _chk=False, bp=book_path: self._execute_move_book(bp, "")
             )
+            menu.addAction(act_uncat)
 
         menu.addSeparator()
-        act_new_move = menu.addAction("+ New Category & Assign Here...")
+        act_new_move = QAction(
+            svg_icon("folder_plus", "#A6E3A1", 14),
+            "New Category & Assign Here...",
+            menu,
+        )
         act_new_move.triggered.connect(
             lambda _chk=False, bp=book_path: self._create_folder_and_move_book(bp)
         )
+        menu.addAction(act_new_move)
 
         menu.addSeparator()
-        act_reveal = menu.addAction("🔍 Show File in File Manager")
+        act_reveal = QAction(
+            svg_icon("external", "#CDD6F4", 14),
+            "Show File in File Manager",
+            menu,
+        )
         act_reveal.triggered.connect(lambda _chk=False, bp=book_path: self._reveal_in_file_manager(bp))
+        menu.addAction(act_reveal)
 
-        act_rem = menu.addAction("🗑 Remove Book from Library")
+        act_rem = QAction(
+            svg_icon("trash", "#F38BA8", 14),
+            "Remove Book from Library",
+            menu,
+        )
         act_rem.triggered.connect(lambda _chk=False, bp=book_path: self.book_remove_requested.emit(bp))
+        menu.addAction(act_rem)
 
         menu.exec(global_pos)
 
@@ -577,7 +591,7 @@ class LibraryView(QWidget):
 
         icon_lbl = QLabel()
         icon_lbl.setAlignment(Qt.AlignCenter)
-        pix = _load_clean_pixmap(72)
+        pix = _load_clean_pixmap(64)
         if not pix.isNull():
             icon_lbl.setPixmap(pix)
         c_layout.addWidget(icon_lbl)
@@ -591,7 +605,7 @@ class LibraryView(QWidget):
         elif self._active_folder not in ("__ALL__", "__UNCAT__"):
             title_txt = f"Category '{self._active_folder}' is Empty"
             desc_txt = (
-                f"Click the '📁 + Folder' badge (or right-click) on any book card in 'All Books' "
+                f"Click the 'Category' button (or right-click) on any book card in 'All Books' "
                 f"to assign it to '{self._active_folder}'."
             )
         else:
@@ -600,14 +614,14 @@ class LibraryView(QWidget):
 
         t_lbl = QLabel(title_txt)
         t_lbl.setAlignment(Qt.AlignCenter)
-        t_lbl.setFont(QFont("Sans Serif", 15, QFont.Bold))
+        t_lbl.setFont(QFont("Inter", 15, QFont.Bold))
         t_lbl.setStyleSheet("color: #CDD6F4;")
         c_layout.addWidget(t_lbl)
 
         d_lbl = QLabel(desc_txt)
         d_lbl.setAlignment(Qt.AlignCenter)
         d_lbl.setWordWrap(True)
-        d_lbl.setStyleSheet("color: #A6ADC8; font-size: 13px; line-height: 1.4;")
+        d_lbl.setStyleSheet("color: #9399B2; font-size: 13px; line-height: 1.4;")
         c_layout.addWidget(d_lbl)
 
         if is_library_totally_empty:
@@ -616,14 +630,14 @@ class LibraryView(QWidget):
             btn_row.setSpacing(12)
             btn_row.setAlignment(Qt.AlignCenter)
 
-            btn_add = QPushButton("+ Add Books")
-            btn_add.setAccessibleName("Add books to library")
+            btn_add = QPushButton("Add Books")
+            btn_add.setIcon(svg_icon("book_plus", "#11111B", 15))
             btn_add.setCursor(Qt.PointingHandCursor)
             btn_add.setStyleSheet("""
                 QPushButton {
                     background-color: #89B4FA;
                     color: #11111B;
-                    font-weight: bold;
+                    font-weight: 700;
                     font-size: 13px;
                     padding: 8px 18px;
                     border-radius: 7px;
@@ -636,14 +650,14 @@ class LibraryView(QWidget):
             btn_add.clicked.connect(self.add_books_requested.emit)
             btn_row.addWidget(btn_add)
 
-            btn_folder = QPushButton("+ Import Folders")
-            btn_folder.setAccessibleName("Import books from folders")
+            btn_folder = QPushButton("Import Folders")
+            btn_folder.setIcon(svg_icon("folder_plus", "#CDD6F4", 15))
             btn_folder.setCursor(Qt.PointingHandCursor)
             btn_folder.setStyleSheet("""
                 QPushButton {
                     background-color: #313244;
                     color: #CDD6F4;
-                    font-weight: bold;
+                    font-weight: 700;
                     font-size: 13px;
                     padding: 8px 18px;
                     border-radius: 7px;

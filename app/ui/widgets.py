@@ -18,7 +18,7 @@ from PySide6.QtWidgets import (
 
 from app.config import EPUB_PAGE_WIDTH, EPUB_PAGE_HEIGHT, HIGHLIGHT_COLORS
 from app.core.renderer import PageRenderer
-
+from app.ui.icon import svg_icon, svg_pixmap
 
 class SelectionPopupBar(QFrame):
     """Floating Evince/Foliate-style action bar when text is selected with the mouse."""
@@ -1428,11 +1428,20 @@ class DocumentCanvasView(QAbstractScrollArea):
         self.smooth_scroll_to_y(target_scroll, duration_ms=duration)
 
 class BookCardWidget(QFrame):
-    """Clickable library card showing cover thumbnail, format, folder badge, progress bar, and remove button."""
+    """Modern library card with SVG icons, format pill, category badge, cover preview, and progress bar."""
 
     clicked = Signal(str)
     remove_requested = Signal(str)
     folder_menu_requested = Signal(str, QPoint)
+
+    FORMAT_COLORS = {
+        "PDF": ("#F38BA8", "#2C1B24"),
+        "EPUB": ("#A6E3A1", "#1B2B22"),
+        "MOBI": ("#FAB387", "#2D221E"),
+        "FB2": ("#89DCEB", "#192930"),
+        "CBZ": ("#CBA6F7", "#251E33"),
+        "TXT": ("#F9E2AF", "#2D2920"),
+    }
 
     def __init__(self, book: dict):
         super().__init__()
@@ -1440,13 +1449,12 @@ class BookCardWidget(QFrame):
         self.category = book.get("category", "").strip()
         self.setObjectName("BookCard")
         self.setCursor(Qt.PointingHandCursor)
-        self.setFixedSize(215, 340)
-        self.setToolTip(f"Open {book.get('title', 'Untitled')}")
+        self.setFixedSize(218, 346)
         self.setStyleSheet("""
             QFrame#BookCard {
                 background-color: #181825;
-                border: 1px solid #313244;
-                border-radius: 10px;
+                border: 1px solid #2A2B3D;
+                border-radius: 12px;
             }
             QFrame#BookCard:hover {
                 background-color: #1E1E2E;
@@ -1462,77 +1470,81 @@ class BookCardWidget(QFrame):
         layout.setContentsMargins(12, 10, 12, 12)
         layout.setSpacing(6)
 
-        # Top row: Format badge + Folder badge + Remove button
+        # Top row: Format pill + SVG Category chip + SVG Close button
         top_row = QHBoxLayout()
         top_row.setContentsMargins(0, 0, 0, 0)
-        top_row.setSpacing(4)
+        top_row.setSpacing(5)
 
-        fmt_badge = QLabel(book.get("format", "BOOK"))
-        fmt_badge.setAccessibleName(f"{book.get('format', 'BOOK')} format")
+        fmt = book.get("format", "BOOK").upper()
+        fg_hex, bg_hex = self.FORMAT_COLORS.get(fmt, ("#89B4FA", "#1E2436"))
+        fmt_badge = QLabel(fmt)
         fmt_badge.setStyleSheet(
-            "color: #89B4FA; font-size: 10px; font-weight: bold; letter-spacing: 0.5px;"
+            f"background-color: {bg_hex}; color: {fg_hex}; font-size: 10px; "
+            f"font-weight: 700; padding: 2px 7px; border-radius: 4px; letter-spacing: 0.4px;"
         )
         top_row.addWidget(fmt_badge)
-
         top_row.addStretch(1)
 
-        folder_label = self.category if self.category else "+ Folder"
-        if len(folder_label) > 12:
-            folder_label = folder_label[:11] + "…"
-        self.btn_folder = QPushButton(f"📁 {folder_label}")
+        folder_label = self.category if self.category else "Category"
+        if len(folder_label) > 11:
+            folder_label = folder_label[:10] + "…"
+        self.btn_folder = QPushButton(folder_label)
+        self.btn_folder.setIcon(
+            svg_icon("folder" if self.category else "folder_plus", "#F9E2AF" if self.category else "#A6ADC8", 13)
+        )
+        self.btn_folder.setIconSize(QSize(13, 13))
         self.btn_folder.setCursor(Qt.PointingHandCursor)
         self.btn_folder.setFocusPolicy(Qt.NoFocus)
         self.btn_folder.setToolTip(
-            f"Current Folder: {self.category or 'Uncategorized'}\nClick to move book to another folder on disk"
+            f"Category: {self.category or 'Uncategorized'}\nClick to assign or change category"
         )
-        self.btn_folder.setStyleSheet("""
-            QPushButton {
-                background-color: #252538;
-                color: #F9E2AF;
-                border: 1px solid #45475A;
-                border-radius: 5px;
+        self.btn_folder.setStyleSheet(f"""
+            QPushButton {{
+                background-color: #232436;
+                color: {"#F9E2AF" if self.category else "#A6ADC8"};
+                border: 1px solid {"#58523F" if self.category else "#36384C"};
+                border-radius: 6px;
                 font-size: 10px;
                 font-weight: 600;
-                padding: 2px 6px;
-            }
-            QPushButton:hover {
+                padding: 2px 7px;
+            }}
+            QPushButton:hover {{
                 background-color: #313244;
-                border-color: #F9E2AF;
+                border-color: #89B4FA;
                 color: #FFFFFF;
-            }
+            }}
         """)
         self.btn_folder.clicked.connect(self._on_folder_btn_clicked)
         top_row.addWidget(self.btn_folder)
 
-        self.btn_remove = QPushButton("×")
-        self.btn_remove.setFixedSize(20, 20)
+        self.btn_remove = QPushButton()
+        self.btn_remove.setIcon(svg_icon("close", "#6C7086", 13))
+        self.btn_remove.setIconSize(QSize(13, 13))
+        self.btn_remove.setFixedSize(22, 22)
         self.btn_remove.setFocusPolicy(Qt.NoFocus)
         self.btn_remove.setToolTip("Remove from Library")
         self.btn_remove.setStyleSheet("""
             QPushButton {
                 background-color: transparent;
-                color: #6C7086;
                 border: none;
-                font-size: 15px;
-                font-weight: bold;
+                border-radius: 5px;
                 padding: 0px;
             }
             QPushButton:hover {
-                color: #F38BA8;
-                background-color: #313244;
-                border-radius: 4px;
+                background-color: #3B232E;
             }
         """)
         self.btn_remove.clicked.connect(lambda: self.remove_requested.emit(self.book_path))
         top_row.addWidget(self.btn_remove)
         layout.addLayout(top_row)
 
-        # Cover thumbnail — supports "cover_path", "cover_image", or "cover" keys
+        # Cover thumbnail
         cover_lbl = QLabel()
-        cover_lbl.setAccessibleName(f"Cover for {book.get('title', 'Untitled')}")
-        cover_lbl.setFixedSize(191, 210)
+        cover_lbl.setFixedSize(194, 210)
         cover_lbl.setAlignment(Qt.AlignCenter)
-        cover_lbl.setStyleSheet("background-color: #11111B; border-radius: 6px;")
+        cover_lbl.setStyleSheet(
+            "background-color: #11111B; border: 1px solid #232436; border-radius: 8px;"
+        )
 
         cover_path = (
             book.get("cover_path")
@@ -1540,48 +1552,40 @@ class BookCardWidget(QFrame):
             or book.get("cover")
             or ""
         )
+        pix_loaded = False
         if cover_path and os.path.exists(cover_path):
             pix = QPixmap(cover_path)
             if not pix.isNull():
                 scaled_pix = pix.scaled(
-                    187, 206, Qt.KeepAspectRatio, Qt.SmoothTransformation
+                    190, 206, Qt.KeepAspectRatio, Qt.SmoothTransformation
                 )
                 cover_lbl.setPixmap(scaled_pix)
-            else:
-                cover_lbl.setText(book.get("format", "BOOK"))
-                cover_lbl.setStyleSheet(
-                    "background-color: #11111B; color: #585B70; font-size: 20px; "
-                    "font-weight: bold; border-radius: 6px;"
-                )
-        else:
-            cover_lbl.setText(book.get("format", "BOOK"))
-            cover_lbl.setStyleSheet(
-                "background-color: #11111B; color: #585B70; font-size: 20px; "
-                "font-weight: bold; border-radius: 6px;"
-            )
+                pix_loaded = True
+
+        if not pix_loaded:
+            cover_lbl.setPixmap(svg_pixmap("book_open", color="#45475A", size=42))
+
         layout.addWidget(cover_lbl, alignment=Qt.AlignCenter)
 
         # Title
-        title_lbl = QLabel(book.get("title", "Untitled"))
+        title_lbl = QLabel()
         title_lbl.setWordWrap(True)
         title_lbl.setFixedHeight(34)
-        title_lbl.setToolTip(book.get("title", "Untitled"))
-        title_lbl.setStyleSheet("color: #CDD6F4; font-weight: bold; font-size: 12px;")
+        title_lbl.setStyleSheet("color: #CDD6F4; font-weight: 700; font-size: 12px;")
         metrics = QFontMetrics(title_lbl.font())
         elided_title = metrics.elidedText(
-            book.get("title", "Untitled"), Qt.ElideRight, 191
+            book.get("title", "Untitled"), Qt.ElideRight, 345
         )
         title_lbl.setText(elided_title)
         layout.addWidget(title_lbl)
 
         # Author
-        author_lbl = QLabel(book.get("author", "Unknown Author"))
-        author_lbl.setToolTip(book.get("author", "Unknown Author"))
-        author_lbl.setStyleSheet("color: #A6ADC8; font-size: 11px;")
+        author_lbl = QLabel()
+        author_lbl.setStyleSheet("color: #9399B2; font-size: 11px;")
         author_metrics = QFontMetrics(author_lbl.font())
         author_lbl.setText(
             author_metrics.elidedText(
-                book.get("author", "Unknown Author"), Qt.ElideRight, 185
+                book.get("author", "Unknown Author"), Qt.ElideRight, 190
             )
         )
         layout.addWidget(author_lbl)
@@ -1589,32 +1593,39 @@ class BookCardWidget(QFrame):
         # Progress bar & page status
         cur = book.get("current_page", 0) + 1
         tot = max(1, book.get("total_pages", 1))
-        pct = min(100, int((cur / tot) * 100)) if cur > 1 else 0
+        pct = int((cur / tot) * 100) if cur > 1 else 0
 
         pbar = QProgressBar()
         pbar.setRange(0, 100)
         pbar.setValue(pct)
         pbar.setTextVisible(False)
         pbar.setFixedHeight(5)
-        pbar.setStyleSheet("""
-            QProgressBar {
-                background-color: #313244;
+        chunk_color = "#A6E3A1" if pct > 0 else "#313244"
+        pbar.setStyleSheet(f"""
+            QProgressBar {{
+                background-color: #252538;
                 border-radius: 2px;
                 border: none;
-            }
-            QProgressBar::chunk {
-                background-color: #A6E3A1;
+            }}
+            QProgressBar::chunk {{
+                background-color: {chunk_color};
                 border-radius: 2px;
-            }
+            }}
         """)
         layout.addWidget(pbar)
 
-        prog_lbl = QLabel(
-            "Completed" if pct >= 100 else f"{pct}% • Page {cur} of {tot}"
+        prog_row = QHBoxLayout()
+        prog_row.setContentsMargins(0, 0, 0, 0)
+        prog_lbl = QLabel(f"Page {cur} of {tot}")
+        prog_lbl.setStyleSheet("color: #6C7086; font-size: 10px; font-weight: 500;")
+        pct_lbl = QLabel(f"{pct}%")
+        pct_lbl.setStyleSheet(
+            f"color: {'#A6E3A1' if pct > 0 else '#585B70'}; font-size: 10px; font-weight: 700;"
         )
-        prog_lbl.setAccessibleName(f"Reading progress: {pct} percent")
-        prog_lbl.setStyleSheet("color: #6C7086; font-size: 10px;")
-        layout.addWidget(prog_lbl)
+        prog_row.addWidget(prog_lbl)
+        prog_row.addStretch(1)
+        prog_row.addWidget(pct_lbl)
+        layout.addLayout(prog_row)
 
     def _on_folder_btn_clicked(self):
         global_pos = self.btn_folder.mapToGlobal(
@@ -1628,7 +1639,6 @@ class BookCardWidget(QFrame):
 
     def mousePressEvent(self, event):
         if event.button() == Qt.LeftButton:
-            # Do not open the book if the user clicked the "+ Folder" or "×" button
             child = self.childAt(event.position().toPoint())
             if child in (self.btn_folder, self.btn_remove):
                 super().mousePressEvent(event)

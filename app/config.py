@@ -1,6 +1,8 @@
 import os
 from pathlib import Path
 
+APP_NAME = "LocalLibrary"
+
 DATA_HOME = Path(os.environ.get("XDG_DATA_HOME", Path.home() / ".local/share"))
 CACHE_HOME = Path(os.environ.get("XDG_CACHE_HOME", Path.home() / ".cache"))
 
@@ -11,10 +13,18 @@ OCR_CACHE_DIR = CACHE_HOME / "local_library" / "ocr_cache"
 LIBRARY_DB_FILE = APP_DATA_DIR / "library.json"
 SETTINGS_FILE = APP_DATA_DIR / "settings.json"
 
+# Backwards-compatible aliases if referenced by any other module
+BASE_CONFIG_DIR = APP_DATA_DIR
+COVERS_DIR = COVERS_CACHE_DIR
+EPUB_CACHE_DIR = SANITIZED_EPUB_CACHE_DIR
+LIBRARY_FILE = LIBRARY_DB_FILE
+
 APP_DATA_DIR.mkdir(parents=True, exist_ok=True)
 COVERS_CACHE_DIR.mkdir(parents=True, exist_ok=True)
 SANITIZED_EPUB_CACHE_DIR.mkdir(parents=True, exist_ok=True)
 OCR_CACHE_DIR.mkdir(parents=True, exist_ok=True)
+
+SUPPORTED_EXTENSIONS = {".pdf", ".epub", ".fb2", ".mobi", ".cbz", ".txt"}
 
 # Reflowable eBook (EPUB, FB2, MOBI) layout configuration
 EPUB_PAGE_WIDTH = 600
@@ -45,18 +55,22 @@ img {
 # Smart Dark Mode & Reading Themes: (Background RGB, Foreground RGB)
 THEMES = {
     "Original (Light)": None,
-    "Smart Dark (Mocha)": ((30, 30, 46), (205, 214, 244)),
-    "Smart Dark (Keep Images)": "preserve_images",
-    "Sepia Warm": ((244, 236, 216), (60, 48, 36)),
-    "Nord Dark": ((46, 52, 64), (216, 222, 233)),
+    "Smart Dark (Mocha)": ((24, 24, 37), (205, 214, 244)),
+    "Dark (Preserve Images)": "preserve_images",
+    "OLED Pitch Black": ((8, 8, 12), (218, 224, 242)),
+    "Warm Sepia": ((244, 236, 216), (62, 44, 28)),
+    "Gruvbox Dark": ((40, 40, 40), (235, 219, 178)),
+    "Nord Night": ((46, 52, 64), (216, 222, 233)),
+    "Solarized Dark": ((0, 43, 54), (147, 161, 161)),
 }
 
 # Multi-Color Highlight Palette
 HIGHLIGHT_COLORS = {
-    "yellow": {"label": "Yellow", "rgb": (249, 226, 175), "hex": "#F9E2AF"},
-    "green":  {"label": "Green",  "rgb": (166, 227, 161), "hex": "#A6E3A1"},
-    "blue":   {"label": "Blue",   "rgb": (137, 220, 235), "hex": "#89DCEB"},
-    "pink":   {"label": "Pink",   "rgb": (245, 194, 231), "hex": "#F5C2E7"},
+    "yellow": {"label": "Amber Gold", "hex": "#F9E2AF", "rgb": (249, 226, 175)},
+    "green": {"label": "Emerald Mint", "hex": "#A6E3A1", "rgb": (166, 227, 161)},
+    "blue": {"label": "Sky Cyan", "hex": "#89DCEB", "rgb": (137, 220, 235)},
+    "pink": {"label": "Rose Pink", "hex": "#F5C2E7", "rgb": (245, 194, 231)},
+    "purple": {"label": "Lavender", "hex": "#CBA6F7", "rgb": (203, 166, 247)},
 }
 
 # Expanded Curated Neural TTS Voices (Edge-TTS Cloud + Kokoro Local)
@@ -99,3 +113,104 @@ TTS_VOICES = [
     # "qwen:ono_anna (Local Qwen3 — Ono Anna Playful Japanese Female)",
     # "qwen:sohee (Local Qwen3 — Sohee Warm Korean Female)",
 ]
+
+GLOBAL_QSS = """
+QMainWindow, QWidget {
+    background-color: #11111B;
+    color: #CDD6F4;
+    font-family: "Inter", "Segoe UI", "Ubuntu", "Cantarell", sans-serif;
+    font-size: 13px;
+}
+
+QToolTip {
+    background-color: #1E1E2E;
+    color: #CDD6F4;
+    border: 1px solid #89B4FA;
+    border-radius: 6px;
+    padding: 5px 8px;
+    font-size: 12px;
+}
+
+QScrollBar:vertical {
+    background: #11111B;
+    width: 10px;
+    margin: 2px;
+    border-radius: 5px;
+}
+QScrollBar::handle:vertical {
+    background: #313244;
+    min-height: 32px;
+    border-radius: 5px;
+}
+QScrollBar::handle:vertical:hover {
+    background: #89B4FA;
+}
+QScrollBar::add-line:vertical, QScrollBar::sub-line:vertical {
+    height: 0px;
+}
+
+QScrollBar:horizontal {
+    background: #11111B;
+    height: 10px;
+    margin: 2px;
+    border-radius: 5px;
+}
+QScrollBar::handle:horizontal {
+    background: #313244;
+    min-width: 32px;
+    border-radius: 5px;
+}
+QScrollBar::handle:horizontal:hover {
+    background: #89B4FA;
+}
+QScrollBar::add-line:horizontal, QScrollBar::sub-line:horizontal {
+    width: 0px;
+}
+
+QComboBox {
+    background-color: #1E1E2E;
+    color: #CDD6F4;
+    border: 1px solid #313244;
+    border-radius: 7px;
+    padding: 5px 10px;
+    font-weight: 500;
+}
+QComboBox:hover {
+    border-color: #89B4FA;
+    background-color: #252538;
+}
+QComboBox::drop-down {
+    border: none;
+    width: 20px;
+}
+QComboBox QAbstractItemView {
+    background-color: #1E1E2E;
+    color: #CDD6F4;
+    selection-background-color: #313244;
+    selection-color: #89B4FA;
+    border: 1px solid #45475A;
+    border-radius: 6px;
+    padding: 4px;
+}
+
+QSlider::groove:horizontal {
+    height: 5px;
+    background: #313244;
+    border-radius: 2px;
+}
+QSlider::sub-page:horizontal {
+    background: #89B4FA;
+    border-radius: 2px;
+}
+QSlider::handle:horizontal {
+    background: #CDD6F4;
+    border: 2px solid #89B4FA;
+    width: 14px;
+    height: 14px;
+    margin: -5px 0;
+    border-radius: 7px;
+}
+QSlider::handle:horizontal:hover {
+    background: #FFFFFF;
+}
+"""
