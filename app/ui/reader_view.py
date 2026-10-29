@@ -6,7 +6,7 @@ from PySide6.QtWidgets import (
     QWidget, QVBoxLayout, QHBoxLayout, QSplitter, QTabWidget,
     QTreeWidget, QTreeWidgetItem, QListWidget, QListWidgetItem,
     QFrame, QLabel, QComboBox, QPushButton, QLineEdit, QSlider,
-    QMenu, QFileDialog, QMessageBox
+    QMenu, QFileDialog, QMessageBox, QCheckBox
 )
 from PySide6.QtCore import Qt, Signal, QTimer, QPoint, QPointF, QUrl, QRectF, QEvent, QSize
 
@@ -382,6 +382,23 @@ class ReaderView(QWidget):
         self._update_follow_button_ui(init_follow)
         self.btn_auto_scroll.clicked.connect(self._on_follow_button_clicked)
         controls_row.addWidget(self.btn_auto_scroll)
+
+        controls_row.addSpacing(6)
+
+        # Toggleable Skip Headers & Footers (chapter names, page numbers, running headers):
+        self.chk_skip_headers = QCheckBox("Skip Headers & Footers")
+        init_skip_hf = bool(self.store.settings.get("tts_skip_headers_footers", True))
+        self.chk_skip_headers.setChecked(init_skip_hf)
+        self.chk_skip_headers.setToolTip(
+            "Skip running chapter titles, headers, footers, and page numbers during TTS reading"
+        )
+        self.chk_skip_headers.setCursor(Qt.PointingHandCursor)
+        self.chk_skip_headers.setStyleSheet(
+            "QCheckBox { color: #CDD6F4; font-size: 12px; font-weight: 500; spacing: 6px; } "
+            "QCheckBox:hover { color: #89B4FA; }"
+        )
+        self.chk_skip_headers.toggled.connect(self._on_skip_headers_toggled)
+        controls_row.addWidget(self.chk_skip_headers)
 
         controls_row.addStretch(1)
         tts_bar_layout.addLayout(controls_row)
@@ -1340,12 +1357,18 @@ class ReaderView(QWidget):
         self.btn_tts_play.setIcon(svg_icon("rotate_ccw", "#11111B", 16))
         self.btn_tts_play.setToolTip("Preparing text… click to cancel")
         self._on_tts_status(f"⏳ Preparing text from page {start_page + 1}...")
+        skip_hf = (
+            self.chk_skip_headers.isChecked()
+            if getattr(self, "chk_skip_headers", None) is not None
+            else bool(self.store.settings.get("tts_skip_headers_footers", True))
+        )
         self._daemon("tts").request(
             "tts_units",
             filepath=self.current_book.get("path", ""),
             start_page=start_page,
             max_pages=15,
             allow_ocr=True,
+            skip_headers_footers=skip_hf,
         )
 
     def _cancel_tts_prepare(self):
@@ -1736,6 +1759,28 @@ class ReaderView(QWidget):
         # If the user just re-locked Follow while TTS is active, smoothly glide right back to the active sentence!
         if checked and self.canvas.active_tts_page is not None and self.canvas.active_tts_sentence:
             self._smooth_follow_active_sentence(force_center=True)
+
+    def _on_skip_headers_toggled(self, checked: bool):
+        self.store.save_settings(tts_skip_headers_footers=checked)
+        # If TTS is currently playing, paused, or preparing text, restart preparation
+        # from current page so the new setting takes effect immediately.
+        if self.tts_worker and self.tts_worker.isRunning():
+            cur_page = self.canvas.active_tts_page
+            if cur_page is None and 0 <= self.tts_worker.current_index < len(self.current_tts_units):
+                cur_page = self.current_tts_units[self.tts_worker.current_index].page_idx
+            if cur_page is None and self.current_book:
+                cur_page = self.current_book.get("current_page", 0)
+            if cur_page is not None:
+                self.stop_tts()
+                self._begin_tts_prepare(
+                    cur_page,
+                    {"mode": "resume", "saved_para": 0, "saved_sent": 0}
+                )
+        elif self._tts_prep is not None and not self._tts_prep.get("launched", False):
+            start_page = self._tts_prep.get("start_page", 0)
+            plan = self._tts_prep.get("plan", {"mode": "resume", "saved_para": 0, "saved_sent": 0})
+            self.stop_tts()
+            self._begin_tts_prepare(start_page, plan)
 
     def _on_user_scrolled_manually(self):
         """

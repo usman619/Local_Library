@@ -112,6 +112,20 @@ QLineEdit::placeholder {
     color: #6C7086;
 }
 
+/* ---- Checkboxes ---- */
+QCheckBox {
+    color: #CDD6F4;
+    font-size: 12px;
+    font-weight: 500;
+    spacing: 6px;
+}
+QCheckBox:hover {
+    color: #89B4FA;
+}
+QCheckBox:focus {
+    outline: none;
+}
+
 /* ---- Sidebar Tabs & Trees ---- */
 QTabWidget::pane {
     border: 1px solid #313244;

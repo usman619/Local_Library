@@ -204,8 +204,14 @@ def _dehyphenate_raw_block(raw_text: str) -> str:
     text = _SPACE_HYPHEN_RE.sub(r"\1\2", text)
     return text
 
-def build_page_units(page_idx: int, blocks: list) -> list[TTSUnit]:
+def build_page_units(
+    page_idx: int,
+    blocks: list,
+    skip_headers_footers: bool = True,
+) -> list[TTSUnit]:
     """Extracts reading-order sentence units from PyMuPDF page blocks."""
+    from app.core.ocr_engine import HybridOCREngine
+
     units: list[TTSUnit] = []
     para_counter = 0
 
@@ -220,11 +226,19 @@ def build_page_units(page_idx: int, blocks: list) -> list[TTSUnit]:
             continue
 
         cleaned_block = " ".join(raw_text.split()).strip()
-        
-        if len(cleaned_block) < 2:
+
+        if not cleaned_block:
             continue
-        if cleaned_block.isdigit() and len(cleaned_block) <= 4:
+        if len(cleaned_block) < 2 and not cleaned_block.isalnum():
             continue
+
+        if skip_headers_footers:
+            if cleaned_block.isdigit() and len(cleaned_block) <= 5:
+                continue
+            if HybridOCREngine.is_page_number_text(cleaned_block):
+                continue
+            if HybridOCREngine.is_chapter_or_header_text(cleaned_block):
+                continue
 
         sentences = _split_into_natural_sentences(cleaned_block)
         if not sentences:
@@ -251,10 +265,11 @@ def extract_page_tts_units(
     page_idx: int,
     filepath: str = "",
     allow_ocr: bool = True,
+    skip_headers_footers: bool = True,
 ) -> tuple[list[TTSUnit], bool]:
     """
     Extracts TTSUnits for page_idx using HybridOCREngine:
-    - Automatically strips PDF headers/footers & standalone page numbers
+    - Strips PDF headers/footers, chapter titles, & standalone page numbers when skip_headers_footers=True
     - Applies C-level de-hyphenation & multi-column reading order sort
     - Automatically falls back to disk-cached Tesseract OCR on scanned pages
     Returns: (units, used_ocr)
@@ -263,9 +278,15 @@ def extract_page_tts_units(
 
     page = doc.load_page(page_idx)
     blocks, used_ocr = HybridOCREngine.extract_clean_blocks(
-        page, page_idx, filepath=filepath, allow_ocr=allow_ocr
+        page,
+        page_idx,
+        filepath=filepath,
+        allow_ocr=allow_ocr,
+        skip_headers_footers=skip_headers_footers,
     )
-    units = build_page_units(page_idx, blocks)
+    units = build_page_units(
+        page_idx, blocks, skip_headers_footers=skip_headers_footers
+    )
     return units, used_ocr
 
 

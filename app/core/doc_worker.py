@@ -156,6 +156,7 @@ def main() -> int:
         end = min(len(doc), start + int(req.get("max_pages", 15)))
         filepath = req.get("filepath", doc_path)
         allow_ocr = bool(req.get("allow_ocr", True))
+        skip_headers_footers = bool(req.get("skip_headers_footers", True))
         total_units = 0
 
         for p_idx in range(start, end):
@@ -163,7 +164,11 @@ def main() -> int:
                 return
             emit({"event": "tts_page_start", "id": rid, "page": p_idx})
             units, used_ocr = extract_page_tts_units(
-                doc, p_idx, filepath=filepath, allow_ocr=allow_ocr
+                doc,
+                p_idx,
+                filepath=filepath,
+                allow_ocr=allow_ocr,
+                skip_headers_footers=skip_headers_footers,
             )
             if is_cancelled(rid):
                 return

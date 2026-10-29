@@ -9,6 +9,59 @@ import pymupdf
 from app.config import OCR_CACHE_DIR
 
 
+# Standalone or decorated page numbers: e.g. "42", "Page 42", "p. 42", "42 of 300", "- 42 -", "[42]", "• 42 •"
+_PAGE_NUM_RE = re.compile(
+    r"^[-–—~•·|\[\]\(\)\s]*(?:page|p\.|pp\.)?\s*\d+\s*(?:(?:of|/)\s*\d+)?[-–—~•·|\[\]\(\)\s]*$",
+    re.IGNORECASE,
+)
+
+# Roman numeral page numbers: e.g. "iv", "XIV", "- xii -", "Page iv", "[ix]"
+_ROMAN_NUM_RE = re.compile(
+    r"^M{0,4}(CM|CD|D?C{0,3})(XC|XL|L?X{0,3})(IX|IV|V?I{0,3})$",
+    re.IGNORECASE,
+)
+_ROMAN_EXCLUDE_WORDS = {"i", "mix", "did", "dim", "mid"}
+
+
+def is_roman_page_num(s: str) -> bool:
+    """Detects standalone Roman numeral page numbers like 'iv', 'XIV', '- xii -', 'Page IV'."""
+    raw = s.strip(" -–—~•·|[]()")
+    has_decor = len(raw) < len(s.strip()) or bool(re.match(r"^(?:page|p\.)\s*", s.strip(), re.I))
+    clean = re.sub(r"^(?:page|p\.)\s*", "", raw, flags=re.IGNORECASE).strip()
+    if not clean or len(clean) > 12:
+        return False
+    if not set(clean.lower()).issubset(set("ivxlcdm")):
+        return False
+    if not _ROMAN_NUM_RE.fullmatch(clean):
+        return False
+    if clean.lower() in _ROMAN_EXCLUDE_WORDS and not has_decor:
+        return False
+    return True
+
+
+# Combined header with page number + title or title + page number:
+# e.g. "12 | Chapter 3: Overview", "Chapter 3: Overview | 12", "12 — Deep Learning", "Deep Learning — 12"
+_COMBINED_HEADER_PAGE_RE = re.compile(
+    r"^(?:\d+\s*[-–—|•·~]\s*.+|.+\s*[-–—|•·~]\s*\d+)$"
+)
+
+# Running Chapter / Section / Part headings:
+# e.g. "Chapter 4", "CHAPTER IV: THE FOREST", "Ch. 2 - Introduction", "Part I: Basics", "Section 3.1"
+_CHAPTER_HEADER_RE = re.compile(
+    r"^(?:chapter|ch\.|part|section|sec\.|book|act|scene)\s+([0-9ivxlcdm]+|[a-z]+)\b.*$",
+    re.IGNORECASE,
+)
+
+# Section numbers: e.g. "1.2 Neural Networks", "3.4.1 Architecture"
+_SECTION_NUMBER_RE = re.compile(r"^\d+(\.\d+)+\s+[A-Z].*")
+
+# Front/Back matter titles commonly appearing in running headers:
+_NAMED_SECTIONS_RE = re.compile(
+    r"^(?:preface|prologue|epilogue|introduction|contents|table of contents|index|bibliography|appendix(?:\s+[a-z0-9]+)?|acknowledgments?|glossary)$",
+    re.IGNORECASE,
+)
+
+
 def is_tesseract_available() -> bool:
     """Checks if tesseract-ocr is installed and accessible on the system PATH."""
     return shutil.which("tesseract") is not None
@@ -18,12 +71,18 @@ class HybridOCREngine:
     """
     Hybrid text extraction engine for LocalLibrary:
     - Column-aware reading-order sorting (prevents jumping left-to-right across columns/sidebars)
-    - Diagram callout & header/footer stripping
+    - Diagram callout & header/footer stripping (including chapter names & page numbers)
     - Smart OCR Path (On-Demand + Disk-Cached) for scanned pages
     """
 
-    HEADER_CUTOFF_RATIO = 0.055  # Top 5.5% of page height
-    FOOTER_CUTOFF_RATIO = 0.945  # Bottom 5.5% of page height
+    HEADER_STRICT_RATIO = 0.080  # Top 8% of page height (strictly running headers / page numbers)
+    HEADER_EXTENDED_RATIO = 0.120  # Top 12% of page height (chapter titles & headers)
+    FOOTER_STRICT_RATIO = 0.920  # Bottom 8% of page height (strictly running footers / page numbers)
+    FOOTER_EXTENDED_RATIO = 0.880  # Bottom 12% of page height (footers, page numbers, copyright)
+
+    # Backward compatibility
+    HEADER_CUTOFF_RATIO = HEADER_STRICT_RATIO
+    FOOTER_CUTOFF_RATIO = FOOTER_STRICT_RATIO
 
     @staticmethod
     def _cache_file(filepath: str, page_idx: int) -> Path:
@@ -99,6 +158,32 @@ class HybridOCREngine:
         return False, False
 
     @classmethod
+    def is_page_number_text(cls, text: str) -> bool:
+        clean = " ".join(text.split()).strip()
+        if not clean:
+            return False
+        if clean.isdigit() and len(clean) <= 5:
+            return True
+        if _PAGE_NUM_RE.fullmatch(clean):
+            return True
+        return is_roman_page_num(clean)
+
+    @classmethod
+    def is_chapter_or_header_text(cls, text: str) -> bool:
+        clean = " ".join(text.split()).strip()
+        if not clean or len(clean) > 120:
+            return False
+        if _CHAPTER_HEADER_RE.fullmatch(clean):
+            return True
+        if _SECTION_NUMBER_RE.fullmatch(clean):
+            return True
+        if _NAMED_SECTIONS_RE.fullmatch(clean):
+            return True
+        if _COMBINED_HEADER_PAGE_RE.fullmatch(clean):
+            return True
+        return False
+
+    @classmethod
     def _is_noise_or_margin_block(
         cls,
         x0: float,
@@ -110,44 +195,63 @@ class HybridOCREngine:
         page_height: float,
         is_reflowable: bool,
         image_rects: list[pymupdf.Rect],
+        skip_headers_footers: bool = True,
     ) -> bool:
         """
-        Filters out running headers/footers, page numbers, and tiny floating diagram labels
-        that cause TTS to jump side-to-side.
+        Filters out noise blocks and, if skip_headers_footers is True,
+        running headers/footers, chapter titles in header zone, and standalone page numbers.
         """
         clean = " ".join(text.split()).strip()
         if not clean or len(clean) < 2:
             return True
 
-        # Standalone page numbers
-        if re.fullmatch(
-            r"[-–—\s]*(?:page\s*)?\d+\s*(?:of\s*\d+)?[-–—\s]*", clean, re.IGNORECASE
-        ):
-            return True
-
-        if is_reflowable or page_height <= 100:
-            return False
-
+        # Tiny isolated 1-2 word diagram callouts (e.g., router ports, arrows, axis labels)
         block_h = y1 - y0
         block_w = x1 - x0
-
-        # Running headers and footers at top/bottom margins
-        if len(clean) <= 105 and block_h <= 30.0:
-            if y1 <= page_height * cls.HEADER_CUTOFF_RATIO:
-                return True
-            if y0 >= page_height * cls.FOOTER_CUTOFF_RATIO:
-                return True
-
-        # Tiny isolated 1-2 word diagram callouts (e.g., router ports, arrows, axis labels)
         words = clean.split()
         if len(words) <= 2 and len(clean) <= 14 and not clean.endswith((".", "!", "?", ":")):
-            # If it's a tiny narrow box or sits inside/next to an image, skip it
-            if block_w < page_width * 0.22:
+            if page_width > 0 and block_w < page_width * 0.22:
                 b_rect = pymupdf.Rect(x0, y0, x1, y1)
                 for ir in image_rects:
                     expanded = pymupdf.Rect(ir.x0 - 15, ir.y0 - 15, ir.x1 + 15, ir.y1 + 15)
                     if b_rect.intersects(expanded):
                         return True
+
+        if not skip_headers_footers:
+            return False
+
+        # --- Header / Footer / Chapter / Page number skipping logic ---
+
+        # 1. Standalone or decorated page numbers (Arabic or Roman, e.g. "42", "Page 42", "xiv")
+        if cls.is_page_number_text(clean):
+            return True
+
+        if is_reflowable or page_height <= 100:
+            return False
+
+        # 2. Strict Header Margin (top 8%): any short single/double line text
+        if y1 <= page_height * cls.HEADER_STRICT_RATIO and block_h <= 32.0 and len(clean) <= 120:
+            return True
+
+        # 3. Extended Header Margin (top 12%): matches chapter/section title, combined header, or divider
+        if y1 <= page_height * cls.HEADER_EXTENDED_RATIO and block_h <= 35.0 and len(clean) <= 120:
+            if cls.is_chapter_or_header_text(clean):
+                return True
+            if any(sep in clean for sep in ("|", "•", "·", "—", "–")) and len(clean) <= 80:
+                return True
+
+        # 4. Strict Footer Margin (bottom 8%): any short single line text
+        if y0 >= page_height * cls.FOOTER_STRICT_RATIO and block_h <= 32.0 and len(clean) <= 120:
+            return True
+
+        # 5. Extended Footer Margin (bottom 12%): matches page number, chapter, combined header, or URL/copyright
+        if y0 >= page_height * cls.FOOTER_EXTENDED_RATIO and block_h <= 35.0 and len(clean) <= 120:
+            if cls.is_chapter_or_header_text(clean):
+                return True
+            if any(term in clean.lower() for term in ("http://", "https://", "www.", "©", "copyright", "all rights reserved")):
+                return True
+            if any(sep in clean for sep in ("|", "•", "·", "—", "–")) and len(clean) <= 80:
+                return True
 
         return False
 
@@ -229,6 +333,7 @@ class HybridOCREngine:
         page_idx: int,
         filepath: str = "",
         allow_ocr: bool = True,
+        skip_headers_footers: bool = True,
     ) -> tuple[list, bool]:
         """
         Returns (cleaned_blocks, used_ocr_flag).
@@ -238,66 +343,69 @@ class HybridOCREngine:
         page_w = float(page.rect.width)
         page_h = float(page.rect.height)
 
+        used_ocr = False
+        raw_blocks = None
         if filepath:
             cached = cls.load_cached_ocr(filepath, page_idx)
             if cached and "blocks" in cached:
-                return cached["blocks"], True
+                raw_blocks = cached["blocks"]
+                used_ocr = True
 
         # Do NOT enable TEXT_DEHYPHENATE here so extracted strings match page.search_for() 1:1
         flags = pymupdf.TEXT_PRESERVE_LIGATURES | pymupdf.TEXT_PRESERVE_WHITESPACE
-        # Extract in native PDF stream order first, then apply our column-aware sorter
-        native_blocks = page.get_text("blocks", sort=False, flags=flags)
 
-        used_ocr = False
-        raw_blocks = native_blocks
+        if raw_blocks is None:
+            # Extract in native PDF stream order first, then apply our column-aware sorter
+            native_blocks = page.get_text("blocks", sort=False, flags=flags)
+            raw_blocks = native_blocks
 
-        if allow_ocr and is_tesseract_available():
-            should_ocr, full_ocr = cls.page_needs_ocr(page, native_blocks)
-            if should_ocr:
-                try:
-                    tp = page.get_textpage_ocr(
-                        flags=flags,
-                        language="eng",
-                        dpi=150,
-                        full=full_ocr,
-                    )
-                    ocr_blocks = page.get_text("blocks", textpage=tp, sort=False)
-                    ocr_words = page.get_text("words", textpage=tp, sort=True)
-                    if ocr_blocks:
-                        raw_blocks = ocr_blocks
-                        used_ocr = True
-                        cls.save_cached_ocr(
-                            filepath,
-                            page_idx,
-                            {
-                                "blocks": [
-                                    [
-                                        float(b[0]),
-                                        float(b[1]),
-                                        float(b[2]),
-                                        float(b[3]),
-                                        str(b[4]),
-                                        int(b[5]),
-                                        0,
-                                    ]
-                                    for b in ocr_blocks
-                                    if len(b) >= 5 and isinstance(b[4], str)
-                                ],
-                                "words": [
-                                    [
-                                        float(w[0]),
-                                        float(w[1]),
-                                        float(w[2]),
-                                        float(w[3]),
-                                        str(w[4]),
-                                    ]
-                                    for w in ocr_words
-                                    if len(w) >= 5
-                                ],
-                            },
+            if allow_ocr and is_tesseract_available():
+                should_ocr, full_ocr = cls.page_needs_ocr(page, native_blocks)
+                if should_ocr:
+                    try:
+                        tp = page.get_textpage_ocr(
+                            flags=flags,
+                            language="eng",
+                            dpi=150,
+                            full=full_ocr,
                         )
-                except Exception:
-                    pass
+                        ocr_blocks = page.get_text("blocks", textpage=tp, sort=False)
+                        ocr_words = page.get_text("words", textpage=tp, sort=True)
+                        if ocr_blocks:
+                            raw_blocks = ocr_blocks
+                            used_ocr = True
+                            cls.save_cached_ocr(
+                                filepath,
+                                page_idx,
+                                {
+                                    "blocks": [
+                                        [
+                                            float(b[0]),
+                                            float(b[1]),
+                                            float(b[2]),
+                                            float(b[3]),
+                                            str(b[4]),
+                                            int(b[5]),
+                                            0,
+                                        ]
+                                        for b in ocr_blocks
+                                        if len(b) >= 5 and isinstance(b[4], str)
+                                    ],
+                                    "words": [
+                                        [
+                                            float(w[0]),
+                                            float(w[1]),
+                                            float(w[2]),
+                                            float(w[3]),
+                                            str(w[4]),
+                                        ]
+                                        for w in ocr_words
+                                        if len(w) >= 5
+                                    ],
+                                },
+                            )
+                    except Exception:
+                        pass
 
         # Collect image rects on this page so we can ignore tiny labels inside diagrams
         image_rects: list[pymupdf.Rect] = []
@@ -322,7 +430,16 @@ class HybridOCREngine:
                 str(b[4]),
             )
             if cls._is_noise_or_margin_block(
-                x0, y0, x1, y1, text, page_w, page_h, is_reflowable, image_rects
+                x0,
+                y0,
+                x1,
+                y1,
+                text,
+                page_w,
+                page_h,
+                is_reflowable,
+                image_rects,
+                skip_headers_footers=skip_headers_footers,
             ):
                 continue
 
