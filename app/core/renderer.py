@@ -16,6 +16,63 @@ class PageRenderer:
     """
 
     @staticmethod
+    def _merge_line_rects(rects: list) -> list:
+        """
+        Merges individual word-level or span-level rectangles that sit on the same
+        horizontal line into a single continuous row rectangle.
+        """
+        if not rects:
+            return []
+
+        import pymupdf
+
+        norm: list[list[float]] = []
+        for r in rects:
+            if hasattr(r, "x0"):  # pymupdf.Rect
+                norm.append([float(r.x0), float(r.y0), float(r.x1), float(r.y1)])
+            elif len(r) >= 4:
+                norm.append([float(r[0]), float(r[1]), float(r[2]), float(r[3])])
+
+        if not norm:
+            return []
+
+        # Group rectangles by line (vertical center proximity) and sort left-to-right
+        lines: list[list[list[float]]] = []
+        for box in norm:
+            y_mid = 0.5 * (box[1] + box[3])
+            h = max(1.0, box[3] - box[1])
+            placed = False
+            for line in lines:
+                ref = line[0]
+                ref_mid = 0.5 * (ref[1] + ref[3])
+                ref_h = max(1.0, ref[3] - ref[1])
+                if abs(y_mid - ref_mid) <= 0.55 * min(h, ref_h):
+                    line.append(box)
+                    placed = True
+                    break
+            if not placed:
+                lines.append([box])
+
+        merged: list[pymupdf.Rect] = []
+        for line in lines:
+            line.sort(key=lambda b: b[0])
+            cur = line[0][:]
+            for nxt in line[1:]:
+                line_h = max(1.0, cur[3] - cur[1])
+                # Merge if horizontal gap is within normal word spacing
+                if (nxt[0] - cur[2]) <= line_h * 3.0:
+                    cur[0] = min(cur[0], nxt[0])
+                    cur[1] = min(cur[1], nxt[1])
+                    cur[2] = max(cur[2], nxt[2])
+                    cur[3] = max(cur[3], nxt[3])
+                else:
+                    merged.append(pymupdf.Rect(cur[0], cur[1], cur[2], cur[3]))
+                    cur = nxt[:]
+            merged.append(pymupdf.Rect(cur[0], cur[1], cur[2], cur[3]))
+
+        return merged
+
+    @staticmethod
     def _find_text_rects(
         page: pymupdf.Page,
         text: str,
@@ -44,11 +101,11 @@ class PageRenderer:
         if clip_rect is not None:
             rects = page.search_for(clean, clip=clip_rect)
             if rects:
-                return rects
+                return PageRenderer._merge_line_rects(rects)
             if len(clean) > 40:
                 rects = page.search_for(clean[:50].strip(), clip=clip_rect)
                 if rects:
-                    return rects
+                    return PageRenderer._merge_line_rects(rects)
 
         # 2. Full-page direct search
         rects = page.search_for(clean)
@@ -56,14 +113,15 @@ class PageRenderer:
             if clip_rect is not None:
                 in_box = [r for r in rects if r.intersects(clip_rect)]
                 if in_box:
-                    return in_box
-            return [rects[0]] if len(clean) < 25 else rects
+                    return PageRenderer._merge_line_rects(in_box)
+            selected = [rects[0]] if len(clean) < 25 else rects
+            return PageRenderer._merge_line_rects(selected)
 
         # 3. Prefix search
         if len(clean) > 45:
             rects = page.search_for(clean[:60].strip(), clip=clip_rect)
             if rects:
-                return rects
+                return PageRenderer._merge_line_rects(rects)
 
         # 4. Scanned PDF fallback: check disk-cached Tesseract OCR word boxes
         if filepath:
@@ -73,7 +131,7 @@ class PageRenderer:
                     filepath, page_idx, clean
                 )
                 if ocr_rects:
-                    return ocr_rects
+                    return PageRenderer._merge_line_rects(ocr_rects)
             except Exception:
                 pass
 

@@ -361,6 +361,7 @@ class DocumentCanvasView(QAbstractScrollArea):
         if page_idx <= 0:
             return 0
         return page_idx if (page_idx % 2 == 1) else (page_idx - 1)
+    
 
     def _get_spread_pages(self, page_idx: int) -> list[int]:
         if not self.doc or len(self.doc) == 0:
