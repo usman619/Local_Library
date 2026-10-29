@@ -118,8 +118,16 @@ SVG_PATHS: dict[str, str] = {
 }
 
 
+def _ensure_gui_app():
+    """Ensures a QGuiApplication exists before creating QPixmap or QSvgRenderer."""
+    if QGuiApplication.instance() is None:
+        import sys
+        QGuiApplication([sys.argv[0] if sys.argv else "local-library", "-platform", "offscreen"])
+
+
 def svg_pixmap(name: str, color: str = "#CDD6F4", size: int = 16, stroke_width: float = 2.0) -> QPixmap:
     """Renders a named vector SVG icon into a crisp HiDPI QPixmap."""
+    _ensure_gui_app()
     inner = SVG_PATHS.get(name, SVG_PATHS["book_open"])
     svg_xml = (
         f'<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" '
@@ -149,59 +157,86 @@ def svg_icon(name: str, color: str = "#CDD6F4", size: int = 16, stroke_width: fl
     return QIcon(svg_pixmap(name, color=color, size=size, stroke_width=stroke_width))
 
 
-def _load_clean_pixmap(size: int = 64) -> QPixmap:
-    """Loads the application logo or falls back to a crisp vector book icon."""
-    candidates = [
-        APP_ICON_PATH,
-        PROJECT_ROOT / "assets" / "icon.png",
-        PROJECT_ROOT / "icon.png",
-    ]
-    for c in candidates:
-        if c.exists():
-            src = QPixmap(str(c)).scaled(
-                size, size, Qt.KeepAspectRatio, Qt.SmoothTransformation
-            )
-            if not src.isNull():
-                out = QPixmap(size, size)
-                out.fill(Qt.transparent)
-                painter = QPainter(out)
-                painter.setRenderHint(QPainter.Antialiasing, True)
-                painter.setRenderHint(QPainter.SmoothPixmapTransform, True)
-                pad = size * 0.022
-                rect = QRectF(pad, pad, size - 2 * pad, size - 2 * pad)
-                radius = size * 0.225
-                path = QPainterPath()
-                path.addRoundedRect(rect, radius, radius)
-                painter.setClipPath(path)
-                painter.drawPixmap(0, 0, src)
-                painter.end()
-                return out
+def _generate_app_badge_pixmap(size: int = 256) -> QPixmap:
+    """Renders a polished Catppuccin Mocha rounded-square app icon with an open book emblem."""
+    _ensure_gui_app()
+    badge_svg = f"""
+    <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 256 256">
+      <defs>
+        <linearGradient id="bgGrad" x1="0%" y1="0%" x2="100%" y2="100%">
+          <stop offset="0%" stop-color="#1E1E2E"/>
+          <stop offset="100%" stop-color="#11111B"/>
+        </linearGradient>
+        <linearGradient id="accentGrad" x1="0%" y1="0%" x2="100%" y2="100%">
+          <stop offset="0%" stop-color="#89B4FA"/>
+          <stop offset="100%" stop-color="#CBA6F7"/>
+        </linearGradient>
+      </defs>
+      <rect x="12" y="12" width="232" height="232" rx="52" fill="url(#bgGrad)" stroke="url(#accentGrad)" stroke-width="8"/>
+      <path d="M56 76h52a24 24 0 0 1 20 11 24 24 0 0 1 20-11h52v108h-52a24 24 0 0 0-20 11 24 24 0 0 0-20-11H56V76z"
+            fill="#181825" stroke="#89B4FA" stroke-width="10" stroke-linecap="round" stroke-linejoin="round"/>
+      <line x1="128" y1="87" x2="128" y2="195" stroke="#89B4FA" stroke-width="10" stroke-linecap="round"/>
+      <polygon points="164,76 184,76 184,126 174,116 164,126" fill="#F9E2AF"/>
+    </svg>
+    """.encode("utf-8")
 
-    return svg_pixmap("book_open", color="#89B4FA", size=size, stroke_width=1.7)
+    pixmap = QPixmap(size, size)
+    pixmap.fill(Qt.transparent)
+    renderer = QSvgRenderer(QByteArray(badge_svg))
+    painter = QPainter(pixmap)
+    painter.setRenderHint(QPainter.Antialiasing, True)
+    renderer.render(painter, QRectF(0, 0, size, size))
+    painter.end()
+    return pixmap
+
+
+def _load_clean_pixmap(size: int = 64) -> QPixmap:
+    """Loads images/app_icon.png smoothly scaled to the requested size."""
+    _ensure_gui_app()
+    if APP_ICON_PATH.exists() and APP_ICON_PATH.stat().st_size > 0:
+        pix = QPixmap(str(APP_ICON_PATH))
+        if not pix.isNull():
+            return pix.scaled(size, size, Qt.KeepAspectRatio, Qt.SmoothTransformation)
+
+    return _generate_app_badge_pixmap(size)
+
 
 
 def get_app_icon() -> QIcon:
-    """Returns a multi-resolution window/application QIcon."""
+    """Returns a multi-resolution QIcon for window titlebar, dock, and taskbar."""
     icon = QIcon()
-    for sz in (32, 64, 128, 256, 512):
+    for sz in (16, 24, 32, 48, 64, 128, 256):
         icon.addPixmap(_load_clean_pixmap(sz))
     return icon
 
 
 def export_icon_files(dest_dir: Path) -> Path:
-    """Saves the clean PNG icon to ~/.local/share/icons/locallibrary.png for the Linux desktop launcher."""
+    """
+    Saves clean PNG icons to ~/.local/share/icons/local-library.png and standard
+    hicolor theme directories (16x16 to 512x512) for the Linux desktop launcher.
+    """
+    _ensure_gui_app()
     dest_dir = Path(dest_dir)
     dest_dir.mkdir(parents=True, exist_ok=True)
-    dest_png = dest_dir / "locallibrary.png"
+    dest_png = dest_dir / "local-library.png"
 
-    # Remove old generated SVG icon if it exists so the desktop environment uses our PNG
-    old_svg = dest_dir / "locallibrary.svg"
-    if old_svg.exists():
-        try:
-            old_svg.unlink()
-        except OSError:
-            pass
+    pix512 = _load_clean_pixmap(512)
+    pix512.save(str(dest_png), "PNG")
 
-    pix = _load_clean_pixmap(512)
-    pix.save(str(dest_png), "PNG")
+    # Install into standard XDG hicolor directories
+    for sz in (16, 24, 32, 48, 64, 128, 256, 512):
+        hicolor_dir = dest_dir / "hicolor" / f"{sz}x{sz}" / "apps"
+        hicolor_dir.mkdir(parents=True, exist_ok=True)
+        _load_clean_pixmap(sz).save(str(hicolor_dir / "local-library.png"), "PNG")
+        # Backwards compatibility
+        _load_clean_pixmap(sz).save(str(hicolor_dir / "locallibrary.png"), "PNG")
+
+    # Clean up old SVGs if present
+    for old_svg in (dest_dir / "local-library.svg", dest_dir / "locallibrary.svg"):
+        if old_svg.exists():
+            try:
+                old_svg.unlink()
+            except OSError:
+                pass
+
     return dest_png

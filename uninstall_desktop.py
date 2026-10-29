@@ -13,13 +13,17 @@ def uninstall_local_library():
     data_dir = Path.home() / ".local/share/local_library"
 
     targets = [
+        apps_dir / "local-library.desktop",
         apps_dir / "locallibrary.desktop",
         apps_dir / "local_library.desktop",
+        icons_dir / "local-library.png",
         icons_dir / "locallibrary.png",
         icons_dir / "locallibrary.svg",
+        Path.home() / ".local/bin/local-library-launcher",
         local_bin,
     ]
-    for sz in (48, 64, 128, 256, 512):
+    for sz in (16, 24, 32, 48, 64, 128, 256, 512):
+        targets.append(icons_dir / "hicolor" / f"{sz}x{sz}" / "apps" / "local-library.png")
         targets.append(icons_dir / "hicolor" / f"{sz}x{sz}" / "apps" / "locallibrary.png")
 
     removed_count = 0

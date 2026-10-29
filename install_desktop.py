@@ -1,79 +1,147 @@
 import os
 import sys
+import stat
 import shutil
+import subprocess
 from pathlib import Path
-from PySide6.QtWidgets import QApplication
-from app.ui.icon import export_icon_files, APP_ICON_PATH, _load_clean_pixmap
 
 
-def install_linux_desktop_launcher():
-    app = QApplication(sys.argv)
-    project_root = Path(__file__).resolve().parent
-    main_script = project_root / "main.py"
-    python_bin = Path(sys.executable).resolve()
+def install_desktop_entry():
+    repo_dir = Path(__file__).resolve().parent
+    main_script = repo_dir / "main.py"
+    python_exe = Path(sys.executable).resolve()
+    # If current Python interpreter is missing PySide6, search for pydev environment
+    try:
+        import PySide6  # noqa: F401
+    except ImportError:
+        for cand in (
+            Path.home() / "anaconda3" / "envs" / "pydev" / "bin" / "python",
+            Path.home() / "miniconda3" / "envs" / "pydev" / "bin" / "python",
+            python_exe.parent.parent / "envs" / "pydev" / "bin" / "python",
+        ):
+            if cand.exists():
+                python_exe = cand.resolve()
+                break
 
-    if not APP_ICON_PATH.exists():
-        print(f"⚠ Warning: Could not find icon at {APP_ICON_PATH}")
+    python_bin_dir = python_exe.parent
+    conda_prefix = python_bin_dir.parent
 
-    # 1. Install into standard XDG hicolor icon directories so Mission Center,
-    #    GNOME, KDE, and docks automatically resolve 'Icon=locallibrary'
-    icons_base = Path.home() / ".local/share/icons"
-    png_path = export_icon_files(icons_base)
+    apps_dir = Path.home() / ".local" / "share" / "applications"
+    icons_base = Path.home() / ".local" / "share" / "icons"
+    icons_dir = icons_base / "hicolor" / "256x256" / "apps"
+    bin_dir = Path.home() / ".local" / "bin"
 
-    for sz in (48, 64, 128, 256, 512):
-        hicolor_dir = icons_base / "hicolor" / f"{sz}x{sz}" / "apps"
-        hicolor_dir.mkdir(parents=True, exist_ok=True)
-        _load_clean_pixmap(sz).save(str(hicolor_dir / "locallibrary.png"), "PNG")
-
-    # 2. Create ~/.local/bin/locallibrary wrapper executable so process launches as 'locallibrary'
-    local_bin_dir = Path.home() / ".local/bin"
-    local_bin_dir.mkdir(parents=True, exist_ok=True)
-    wrapper_script = local_bin_dir / "locallibrary"
-    wrapper_content = f"""#!/usr/bin/env bash
-exec -a locallibrary "{python_bin}" "{main_script}" "$@"
-"""
-    wrapper_script.write_text(wrapper_content, encoding="utf-8")
-    os.chmod(wrapper_script, 0o755)
-
-    # 3. Write standard XDG .desktop file matching StartupWMClass=locallibrary
-    apps_dir = Path.home() / ".local/share/applications"
     apps_dir.mkdir(parents=True, exist_ok=True)
-    desktop_file = apps_dir / "locallibrary.desktop"
+    icons_dir.mkdir(parents=True, exist_ok=True)
+    bin_dir.mkdir(parents=True, exist_ok=True)
 
+    # 1. Use images/app_icon.png as the primary application icon
+    icon_src = repo_dir / "images" / "app_icon.png"
+    if not (icon_src.exists() and icon_src.stat().st_size > 0):
+        for candidate in (
+            repo_dir / "assets" / "icon.png",
+            repo_dir / "icon.png",
+            repo_dir / "app_icon.png",
+        ):
+            if candidate.exists() and candidate.stat().st_size > 0:
+                icon_src = candidate
+                break
+
+    # 2. Export multi-resolution icons across standard XDG hicolor directories
+    try:
+        subprocess.run(
+            [
+                str(python_exe),
+                "-c",
+                f"from pathlib import Path; from app.ui.icon import export_icon_files; export_icon_files(Path(r'{icons_base}'))",
+            ],
+            cwd=str(repo_dir),
+            check=False,
+            timeout=10,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+        )
+    except Exception:
+        pass
+
+    icon_target = icons_dir / "local-library.png"
+    if icon_src.exists() and not icon_target.exists():
+        icon_target.write_bytes(icon_src.read_bytes())
+
+    root_icon = icons_base / "local-library.png"
+    if icon_src.exists() and not root_icon.exists():
+        root_icon.write_bytes(icon_src.read_bytes())
+
+    icon_value = str(icon_target) if icon_target.exists() else (str(root_icon) if root_icon.exists() else "local-library")
+
+    # 3. Create dedicated launcher script that preserves Conda/venv PATH
+    launcher_path = bin_dir / "local-library-launcher"
+    launcher_content = f"""#!/usr/bin/env bash
+export PATH="{python_bin_dir}:$HOME/.local/bin:$PATH"
+export CONDA_PREFIX="{conda_prefix}"
+export _LOCAL_LIBRARY_BOOTSTRAPPED="0"
+cd "{repo_dir}" || exit 1
+exec "{python_exe}" "{main_script}" "$@"
+"""
+    launcher_path.write_text(launcher_content, encoding="utf-8")
+    launcher_path.chmod(launcher_path.stat().st_mode | stat.S_IEXEC | stat.S_IXGRP | stat.S_IXOTH)
+
+    # 4. Write .desktop launcher file
+    desktop_file = apps_dir / "local-library.desktop"
     desktop_content = f"""[Desktop Entry]
 Version=1.0
 Type=Application
 Name=LocalLibrary
 GenericName=eBook & PDF Reader
-Comment=Read PDF, EPUB, FB2, MOBI, and CBZ books with GPU Neural TTS
-Exec={wrapper_script} %f
-TryExec={wrapper_script}
-WorkingDirectory={project_root}
-Icon={png_path}
+Comment=Linux eBook & PDF Reader with Neural TTS and Smart Dark Mode
+Exec="{launcher_path}" %F
+Path={repo_dir}
+Icon={icon_value}
 Terminal=false
 StartupNotify=true
+StartupWMClass=local-library
 Categories=Office;Viewer;Literature;Education;
 MimeType=application/pdf;application/epub+zip;application/x-fictionbook+xml;application/x-mobipocket-ebook;application/vnd.comicbook+zip;
-StartupWMClass=locallibrary
-X-GNOME-WMClass=locallibrary
 """
     desktop_file.write_text(desktop_content, encoding="utf-8")
-    os.chmod(desktop_file, 0o755)
+    desktop_file.chmod(desktop_file.stat().st_mode | stat.S_IEXEC)
 
-    #Also remove any old local_library.desktop duplicate if present
-    old_dup = apps_dir / "local_library.desktop"
-    if old_dup.exists():
-        old_dup.unlink()
+    # Remove any old duplicates
+    for old_desktop in (apps_dir / "locallibrary.desktop", apps_dir / "local_library.desktop"):
+        if old_desktop.exists() and old_desktop != desktop_file:
+            try:
+                old_desktop.unlink()
+            except OSError:
+                pass
+
+    # 5. Refresh system desktop and icon databases
+    if shutil.which("gtk-update-icon-cache"):
+        try:
+            subprocess.run(
+                ["gtk-update-icon-cache", "-f", "-t", str(icons_base / "hicolor")],
+                check=False,
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+            )
+        except Exception:
+            pass
 
     if shutil.which("update-desktop-database"):
-        os.system(f'update-desktop-database "{apps_dir}" 2>/dev/null')
-    if shutil.which("gtk-update-icon-cache"):
-        os.system(f'gtk-update-icon-cache -f -t "{icons_base / "hicolor"}" 2>/dev/null')
+        try:
+            subprocess.run(
+                ["update-desktop-database", str(apps_dir)],
+                check=False,
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+            )
+        except Exception:
+            pass
 
-    print(f"✔ Installed wrapper binary: {wrapper_script}")
-    print(f"✔ Installed icons to: {png_path} and hicolor theme")
-    print(f"✔ Installed Linux desktop launcher: {desktop_file}")
+    print(f"✔ Installed launcher script: {launcher_path}")
+    print(f"✔ Installed icon to: {icon_target}")
+    print(f"✔ Installed desktop entry : {desktop_file}")
+    print(f"✔ Bound Python environment: {python_exe}")
 
 
 if __name__ == "__main__":
-    install_linux_desktop_launcher()
+    install_desktop_entry()

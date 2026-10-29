@@ -1,5 +1,6 @@
 import os
 import re
+import sys
 import ssl
 import time
 import shutil
@@ -7,6 +8,7 @@ import asyncio
 import tempfile
 import threading
 import subprocess
+from pathlib import Path
 from dataclasses import dataclass
 from concurrent.futures import ThreadPoolExecutor, Future
 from PySide6.QtCore import QThread, Signal
@@ -18,6 +20,59 @@ try:
 except ImportError:
     if os.path.exists("/etc/ssl/certs/ca-certificates.crt"):
         os.environ.setdefault("SSL_CERT_FILE", "/etc/ssl/certs/ca-certificates.crt")
+
+
+def _ensure_conda_bin_in_path():
+    """
+    When launched from a Linux desktop icon (.desktop), the shell's Conda PATH is not loaded.
+    Prepend the active Python interpreter's bin/ directory and ~/.local/bin to PATH
+    so shutil.which() finds edge-tts, ffmpeg, ffplay, and mpv.
+    """
+    py_bin = str(Path(sys.executable).resolve().parent)
+    local_bin = str(Path.home() / ".local" / "bin")
+    cur_path = os.environ.get("PATH", "")
+    parts = cur_path.split(os.pathsep) if cur_path else []
+    changed = False
+    for d in (py_bin, local_bin):
+        if d and os.path.isdir(d) and d not in parts:
+            parts.insert(0, d)
+            changed = True
+    if changed:
+        os.environ["PATH"] = os.pathsep.join(parts)
+
+
+_ensure_conda_bin_in_path()
+
+
+def _clean_system_env() -> dict:
+    """
+    Returns a safe copy of os.environ for CLI subprocesses (like edge-tts) that:
+    - Marks the process as a worker so main.py's bootstrapper never spawns a second GUI window
+    - Preserves the active Python/Conda bin directory in PATH
+    """
+    _ensure_conda_bin_in_path()
+    env = os.environ.copy()
+    env["_LOCAL_LIBRARY_BOOTSTRAPPED"] = "1"
+    env["_LOCAL_LIBRARY_WORKER"] = "1"
+    return env
+
+
+def _get_audio_player_env(player_executable: str) -> dict:
+    """
+    Returns a clean environment for external audio players (mpv, ffplay, gst-play-1.0, cvlc, paplay).
+    If the player is a system binary in /usr/bin or /bin, strips Conda's LD_PRELOAD and
+    LD_LIBRARY_PATH so system audio binaries don't fail with C++ runtime symbol conflicts.
+    """
+    env = _clean_system_env()
+    resolved_bin = shutil.which(player_executable) or player_executable
+    conda_prefix = os.environ.get("CONDA_PREFIX") or str(
+        Path(sys.executable).resolve().parent.parent
+    )
+    # If the audio player is a system binary outside the Conda environment, strip Conda's preload
+    if resolved_bin and not str(resolved_bin).startswith(str(conda_prefix)):
+        env.pop("LD_PRELOAD", None)
+        env.pop("LD_LIBRARY_PATH", None)
+    return env
 
 
 # _GLOBAL_QWEN_MODEL = None
@@ -34,23 +89,23 @@ _GLOBAL_MODEL_LOCK = threading.Lock()
 #     with _GLOBAL_MODEL_LOCK:
 #         if _GLOBAL_QWEN_MODEL is not None:
 #             return _GLOBAL_QWEN_MODEL
-
+#
 #         import torch
 #         from qwen_tts import Qwen3TTSModel
-
+#
 #         if not torch.cuda.is_available():
 #             raise RuntimeError("CUDA is not available on this system. Qwen3-TTS is configured for GPU ONLY.")
-
+#
 #         os.environ.setdefault("PYTORCH_CUDA_ALLOC_CONF", "expandable_segments:True")
-
+#
 #         # Determine precision: bfloat16 for Ampere+ (SM 80+), float16 for Pascal/Turing (SM 60-75)
 #         cap = torch.cuda.get_device_capability(0)
 #         dtype = torch.bfloat16 if cap[0] >= 8 else torch.float16
-
+#
 #         if status_callback:
 #             gpu_name = torch.cuda.get_device_name(0)
 #             status_callback(f"⏳ Initializing Qwen3-TTS on GPU ({gpu_name})...")
-
+#
 #         _GLOBAL_QWEN_MODEL = Qwen3TTSModel.from_pretrained(
 #             "Qwen/Qwen3-TTS-12Hz-0.6B-CustomVoice",
 #             device_map="cuda:0",
@@ -117,6 +172,38 @@ def _split_into_natural_sentences(paragraph: str) -> list[str]:
     return sentences if sentences else [text]
 
 
+# Matches all PDF/EPUB line-wrap hyphen characters:
+# ASCII (-), Soft Hyphen (\u00ad), Unicode Hyphen (\u2010), Non-Breaking Hyphen (\u2011),
+# Figure Dash (\u2012), Small/Fullwidth Hyphens (\ufe63, \uff0d)
+_HYPHEN_CHARS = r"\-\u00ad\u2010\u2011\u2012\ufe63\uff0d"
+_ZERO_WIDTH_RE = re.compile(r"[\u200b\u200c\u200d\ufeff]")
+
+# 1. Line-break hyphenation (while \n is still present): "summa-\nrizes" -> "summarizes", "Janu-\nary" -> "January"
+_LINEBREAK_HYPHEN_RE = re.compile(
+    rf"([A-Za-z])[ \t]*[{_HYPHEN_CHARS}][ \t]*\r?\n[ \t]*([a-z])"
+)
+
+# 2. Flattened space hyphenation: "summa- rizes" or "Janu\u2010 ary" -> "summarizes", "January"
+_SPACE_HYPHEN_RE = re.compile(
+    rf"([A-Za-z])[ \t]*[{_HYPHEN_CHARS}]\s+([a-z])"
+)
+
+
+def _dehyphenate_raw_block(raw_text: str) -> str:
+    """
+    Rejoins words split across PDF/EPUB line breaks (e.g. 'summa-\\nrizes' -> 'summarizes',
+    'Janu-\\nary' -> 'January') BEFORE newlines are flattened into spaces, while preserving
+    true mid-line compound words like 'follow-up'.
+    """
+    text = _ZERO_WIDTH_RE.sub("", raw_text)
+    # Rejoin hyphen + newline + lowercase continuation
+    text = _LINEBREAK_HYPHEN_RE.sub(r"\1\2", text)
+    # Strip any remaining invisible soft hyphens (\u00ad) inside words
+    text = text.replace("\u00ad", "")
+    # Catch cases where a newline was already turned into a space after a hyphen
+    text = _SPACE_HYPHEN_RE.sub(r"\1\2", text)
+    return text
+
 def build_page_units(page_idx: int, blocks: list) -> list[TTSUnit]:
     """Extracts reading-order sentence units from PyMuPDF page blocks."""
     units: list[TTSUnit] = []
@@ -133,6 +220,7 @@ def build_page_units(page_idx: int, blocks: list) -> list[TTSUnit]:
             continue
 
         cleaned_block = " ".join(raw_text.split()).strip()
+        
         if len(cleaned_block) < 2:
             continue
         if cleaned_block.isdigit() and len(cleaned_block) <= 4:
@@ -157,6 +245,7 @@ def build_page_units(page_idx: int, blocks: list) -> list[TTSUnit]:
 
     return units
 
+
 def extract_page_tts_units(
     doc,
     page_idx: int,
@@ -178,6 +267,7 @@ def extract_page_tts_units(
     )
     units = build_page_units(page_idx, blocks)
     return units, used_ocr
+
 
 class NeuralTTSWorker(QThread):
     """
@@ -211,6 +301,7 @@ class NeuralTTSWorker(QThread):
         self.is_paused = False
         self._stop_requested = False
         self._param_version = 0
+        self._seek_target: int | None = None
         self._active_proc: subprocess.Popen | None = None
         self._temp_dir = tempfile.mkdtemp(prefix="locallibrary_tts_")
         self._last_error: str = ""
@@ -255,7 +346,7 @@ class NeuralTTSWorker(QThread):
         self.is_paused = True
         self._kill_active_audio()
         self.playback_state_changed.emit("paused")
-        self.status_changed.emit("⏸ TTS Paused — Click ▶ to resume from this sentence")
+        self.status_changed.emit("TTS Paused — Click Play to resume from this sentence")
 
     def resume(self):
         if self.is_paused:
@@ -266,6 +357,27 @@ class NeuralTTSWorker(QThread):
         self._stop_requested = True
         self.is_paused = False
         self._kill_active_audio()
+    
+    def seek(self, target_index: int):
+        """Immediately interrupts current audio and jumps to target_index."""
+        if not self.units:
+            return
+        clamped = max(0, min(len(self.units) - 1, int(target_index)))
+        self._seek_target = clamped
+        self.current_index = clamped
+        self._param_version += 1
+        if self.is_paused:
+            self.is_paused = False
+            self.playback_state_changed.emit("playing")
+        self._kill_active_audio()
+
+    def next_sentence(self):
+        """Skips immediately to the next sentence."""
+        self.seek(self.current_index + 1)
+
+    def prev_sentence(self):
+        """Skips immediately to the previous sentence."""
+        self.seek(self.current_index - 1)
 
     def _kill_active_audio(self):
         proc = self._active_proc
@@ -290,9 +402,17 @@ class NeuralTTSWorker(QThread):
     ) -> str | None:
         if self._stop_requested or version != self._param_version:
             return None
-
-        # Clean hyphenated line-breaks for speech synthesis only
-        spoken_text = re.sub(r"([a-zA-Z])-\s+([a-z])", r"\1\2", text).strip()
+        
+        # Only modify spoken_text for TTS audio; `unit.text` stays intact for PDF highlighting!
+        spoken_text = re.sub(r"[\u200b\u200c\u200d\ufeff]", "", text)
+        spoken_text = re.sub(
+            r"([A-Za-z])[ \t]*[\-\u00ad\u2010\u2011\u2012\u2013\ufe63\uff0d]\s+([a-z])",
+            r"\1\2",
+            spoken_text,
+        )
+        spoken_text = spoken_text.replace("\u00ad", "")
+        spoken_text = re.sub(r"\s*—\s*", " — ", spoken_text)
+        spoken_text = " ".join(spoken_text.split()).strip()
         if not spoken_text:
             return None
 
@@ -353,6 +473,7 @@ class NeuralTTSWorker(QThread):
             self._last_error = f"Edge-TTS error: {e}"
 
         # CLI fallback if edge-tts Python async loop had an SSL/aiohttp issue
+        _ensure_conda_bin_in_path()
         edge_cli = shutil.which("edge-tts")
         if edge_cli:
             try:
@@ -366,7 +487,13 @@ class NeuralTTSWorker(QThread):
                     "--text", text,
                     "--write-media", out_path,
                 ]
-                subprocess.run(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=12)
+                subprocess.run(
+                    cmd,
+                    stdout=subprocess.DEVNULL,
+                    stderr=subprocess.DEVNULL,
+                    timeout=12,
+                    env=_clean_system_env(),  # <-- Safe worker environment
+                )
                 if os.path.exists(out_path) and os.path.getsize(out_path) > 128:
                     return out_path
             except Exception as e:
@@ -399,40 +526,6 @@ class NeuralTTSWorker(QThread):
             self._last_error = f"Kokoro error: {e}"
         return False
 
-    # def _synthesize_qwen(
-    #     self, text: str, speaker: str, speed: float, out_wav: str
-    # ) -> bool:
-    #     """Synthesize speech using Qwen3-TTS 0.6B CustomVoice (local offline)."""
-    #     try:
-    #         import soundfile as sf
-
-    #         model = _get_qwen_model(status_callback=self.status_changed.emit)
-
-    #         # Map speed slider (0.5–2.0) to a natural instruction
-    #         if speed <= 0.7:
-    #             speed_instr = "Speak slowly and deliberately."
-    #         elif speed >= 1.5:
-    #             speed_instr = "Speak quickly with energy."
-    #         else:
-    #             speed_instr = "Speak at a natural, comfortable pace."
-
-    #         with _GLOBAL_MODEL_LOCK:
-    #             wavs, sr = model.generate_custom_voice(
-    #                 text=[text],
-    #                 language=["auto"],
-    #                 speaker=[speaker],
-    #                 instruct=[speed_instr],
-    #             )
-    #         if wavs is not None and len(wavs) > 0 and len(wavs[0]) > 0:
-    #             sf.write(out_wav, wavs[0], sr)
-    #             import torch
-    #             if torch.cuda.is_available():
-    #                 torch.cuda.empty_cache()
-    #             return True
-    #     except Exception as e:
-    #         self._last_error = f"Qwen3-TTS error: {e}"
-    #     return False
-
     def _play_audio_file(self, filepath: str):
         """
         Plays MP3/WAV audio using the best available Linux audio tool:
@@ -443,29 +536,33 @@ class NeuralTTSWorker(QThread):
         if not filepath or not os.path.exists(filepath) or self._stop_requested:
             return
 
+        _ensure_conda_bin_in_path()
+
         cmd = None
         if shutil.which("mpv"):
-            cmd = ["mpv", "--no-video", "--really-quiet", filepath]
+            cmd = [shutil.which("mpv"), "--no-video", "--really-quiet", filepath]
         elif shutil.which("ffplay"):
-            cmd = ["ffplay", "-nodisp", "-autoexit", "-loglevel", "quiet", filepath]
+            cmd = [shutil.which("ffplay"), "-nodisp", "-autoexit", "-loglevel", "quiet", filepath]
         elif shutil.which("gst-play-1.0"):
-            cmd = ["gst-play-1.0", "--quiet", "--no-interactive", filepath]
+            cmd = [shutil.which("gst-play-1.0"), "--quiet", "--no-interactive", filepath]
         elif shutil.which("mpg123") and filepath.endswith(".mp3"):
-            cmd = ["mpg123", "-q", filepath]
+            cmd = [shutil.which("mpg123"), "-q", filepath]
         elif shutil.which("cvlc"):
-            cmd = ["cvlc", "--play-and-exit", "--quiet", filepath]
+            cmd = [shutil.which("cvlc"), "--play-and-exit", "--quiet", filepath]
         elif shutil.which("paplay") and filepath.endswith(".wav"):
-            cmd = ["paplay", filepath]
+            cmd = [shutil.which("paplay"), filepath]
         elif shutil.which("ffmpeg") and (shutil.which("paplay") or shutil.which("aplay")):
             # Convert .mp3 to .wav via ffmpeg and play with paplay/aplay
+            ffmpeg_bin = shutil.which("ffmpeg")
             wav_tmp = filepath + ".wav"
             try:
                 subprocess.run(
-                    ["ffmpeg", "-y", "-i", filepath, "-loglevel", "quiet", wav_tmp],
+                    [ffmpeg_bin, "-y", "-i", filepath, "-loglevel", "quiet", wav_tmp],
                     timeout=8,
+                    env=_get_audio_player_env(ffmpeg_bin),  # <-- Clean audio env
                 )
                 if os.path.exists(wav_tmp):
-                    player = "paplay" if shutil.which("paplay") else "aplay"
+                    player = shutil.which("paplay") or shutil.which("aplay")
                     cmd = [player, wav_tmp]
             except Exception:
                 pass
@@ -473,7 +570,10 @@ class NeuralTTSWorker(QThread):
         if cmd:
             try:
                 self._active_proc = subprocess.Popen(
-                    cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL
+                    cmd,
+                    stdout=subprocess.DEVNULL,
+                    stderr=subprocess.DEVNULL,
+                    env=_get_audio_player_env(cmd[0]),  # <-- Clean audio env
                 )
                 while self._active_proc and self._active_proc.poll() is None:
                     if self._stop_requested or self.is_paused:
@@ -524,22 +624,36 @@ class NeuralTTSWorker(QThread):
         try:
             idx = self.current_index
             while not self._stop_requested:
+                # 1. Check if user clicked Next / Prev sentence button
+                if self._seek_target is not None:
+                    idx = self._seek_target
+                    self._seek_target = None
+                    self.current_index = idx
+
                 # Wait for units to become available when the background daemon
                 # is still extracting text from upcoming pages.
                 if idx >= len(self.units):
                     if not getattr(self, "expect_more_units", False):
                         break
-                    # Poll until new units arrive or preparation finishes
                     while idx >= len(self.units) and not self._stop_requested:
+                        if self._seek_target is not None:
+                            break
                         if not getattr(self, "expect_more_units", False):
                             break
-                        time.sleep(0.1)
+                        time.sleep(0.05)
+                    if self._seek_target is not None:
+                        continue
                     if idx >= len(self.units):
                         break
+
                 while self.is_paused and not self._stop_requested:
+                    if self._seek_target is not None:
+                        break
                     time.sleep(0.04)
                 if self._stop_requested:
                     break
+                if self._seek_target is not None:
+                    continue
 
                 ver = self._param_version
 
@@ -575,6 +689,8 @@ class NeuralTTSWorker(QThread):
                     continue
                 if self._stop_requested or self.is_paused:
                     continue
+                if self._seek_target is not None:
+                    continue
 
                 if audio_file and os.path.exists(audio_file):
                     consecutive_failures = 0
@@ -592,11 +708,18 @@ class NeuralTTSWorker(QThread):
 
                     # Only clean up the audio file if the sentence finished
                     # or was stopped — NOT when paused, so it replays on resume.
-                    if not self.is_paused:
+                    if not self.is_paused and self._seek_target is None:
                         try:
                             os.remove(audio_file)
                         except OSError:
                             pass
+
+                    # If user clicked Next/Prev during playback, jump immediately to _seek_target!
+                    if self._seek_target is not None:
+                        idx = self._seek_target
+                        self._seek_target = None
+                        self.current_index = idx
+                        continue
 
                     # If settings/voice changed during playback, don't advance idx:
                     # immediately replay this sentence with the new voice!

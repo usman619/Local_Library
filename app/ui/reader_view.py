@@ -1167,27 +1167,31 @@ class ReaderView(QWidget):
     # -----------------------------------------------------------------
     def prev_tts_sentence(self):
         """Skips back to the previous TTS sentence unit."""
-        if hasattr(self, "tts_prev"):
-            self.tts_prev()
+        if self.tts_worker and self.tts_worker.isRunning():
+            self.tts_worker.prev_sentence()
             return
-        if self.tts_worker and self.current_tts_units:
-            target = max(0, self.tts_worker.current_index - 1)
-            if hasattr(self.tts_worker, "seek"):
-                self.tts_worker.seek(target)
-            else:
-                self.tts_worker.current_index = target
+        # If TTS is stopped but we have units loaded, step back and start TTS from there
+        if self.current_tts_units:
+            cur_idx = getattr(self.tts_worker, "current_index", 0) if self.tts_worker else 0
+            new_idx = max(0, cur_idx - 1)
+            u = self.current_tts_units[new_idx]
+            self._on_tts_unit_started(u.page_idx, u.para_idx, u.sent_idx, u.text)
+            if self.tts_worker:
+                self.tts_worker.current_index = new_idx
 
     def next_tts_sentence(self):
         """Skips forward to the next TTS sentence unit."""
-        if hasattr(self, "tts_next"):
-            self.tts_next()
+        if self.tts_worker and self.tts_worker.isRunning():
+            self.tts_worker.next_sentence()
             return
-        if self.tts_worker and self.current_tts_units:
-            target = min(len(self.current_tts_units) - 1, self.tts_worker.current_index + 1)
-            if hasattr(self.tts_worker, "seek"):
-                self.tts_worker.seek(target)
-            else:
-                self.tts_worker.current_index = target
+        # If TTS is stopped but we have units loaded, step forward and highlight
+        if self.current_tts_units:
+            cur_idx = getattr(self.tts_worker, "current_index", 0) if self.tts_worker else 0
+            new_idx = min(len(self.current_tts_units) - 1, cur_idx + 1)
+            u = self.current_tts_units[new_idx]
+            self._on_tts_unit_started(u.page_idx, u.para_idx, u.sent_idx, u.text)
+            if self.tts_worker:
+                self.tts_worker.current_index = new_idx
     
     def toggle_tts(self):
         """Toggles Neural TTS playback between play, pause, and start."""
