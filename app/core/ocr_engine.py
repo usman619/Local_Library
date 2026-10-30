@@ -274,7 +274,7 @@ class HybridOCREngine:
         left_col = []
         right_col = []
         for b in blocks:
-            x0, y0, x1, y1 = b[0], b[1], b[2], b[3]
+            x0, x1 = b[0], b[2]
             bw = x1 - x0
             # Check if block is strictly confined to left half or right half
             if x1 <= mid_x + 18 and bw < page_width * 0.48:

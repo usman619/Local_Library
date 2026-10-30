@@ -70,6 +70,7 @@ _bootstrap_conda_runtime()
 
 from PySide6.QtCore import Qt
 from PySide6.QtWidgets import QApplication
+from app.config import SUPPORTED_EXTENSIONS
 from app.ui.main_window import LocalLibraryWindow
 from app.ui.icon import get_app_icon
 
@@ -86,6 +87,14 @@ def main():
 
     window = LocalLibraryWindow()
     window.show()
+
+    # If a book file was passed as a CLI argument (e.g. from file manager), open it directly
+    for arg in sys.argv[1:]:
+        if not arg.startswith("-") and os.path.exists(arg):
+            if Path(arg).suffix.lower() in SUPPORTED_EXTENSIONS:
+                window.open_book(os.path.abspath(arg))
+                break
+
     sys.exit(app.exec())
 
 

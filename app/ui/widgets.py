@@ -9,7 +9,7 @@ from PySide6.QtCore import (
     QVariantAnimation, QEasingCurve, QSignalBlocker,
 )
 from PySide6.QtGui import (
-    QPixmap, QFont, QCursor, QNativeGestureEvent, QPainter, QColor, QPen, QFontMetrics
+    QPixmap, QCursor, QNativeGestureEvent, QPainter, QColor, QPen, QFontMetrics
 )
 from PySide6.QtWidgets import (
     QAbstractScrollArea, QLabel, QFrame, QVBoxLayout, QHBoxLayout,
@@ -554,7 +554,15 @@ class DocumentCanvasView(QAbstractScrollArea):
                 dest = link.get("dest")
                 if dest is not None and self.doc:
                     try:
-                        pno = self.doc.get_page_number(dest)
+                        pno = None
+                        if hasattr(self.doc, "resolve_names"):
+                            names = self.doc.resolve_names()
+                            if dest in names:
+                                pno = names[dest].get("page")
+                        if pno is None and hasattr(self.doc, "resolve_link"):
+                            res = self.doc.resolve_link(dest)
+                            if res and isinstance(res[0], int):
+                                pno = res[0]
                         if isinstance(pno, int) and 0 <= pno < len(self.doc):
                             self.jump_to_page(pno)
                             return True
@@ -574,6 +582,8 @@ class DocumentCanvasView(QAbstractScrollArea):
 
         if next_p < total:
             self.jump_to_page(next_p)
+
+    step_next = step_Next
 
     def step_prev(self):
         if not self.doc:
@@ -918,7 +928,7 @@ class DocumentCanvasView(QAbstractScrollArea):
         self.viewport().update()
 
     def ensure_page_rect_visible(self, page_idx: int, pdf_rect: pymupdf.Rect):
-        if not (0 <= page_idx < len(self.page_y)):
+        if not self.doc or not (0 <= page_idx < len(self.page_y)):
             return
         if self.view_mode == "continuous":
             self.current_page = page_idx
@@ -1087,6 +1097,7 @@ class DocumentCanvasView(QAbstractScrollArea):
             self.zoom,
             self.theme_name,
             page_highlights,
+            user_highlights=page_highlights,
             active_tts_text=active_tts,
             dpr=dpr,
         )
@@ -1182,6 +1193,8 @@ class DocumentCanvasView(QAbstractScrollArea):
             d = dx * dx + dy * dy
             if best_d is None or d < best_d:
                 best, best_d = (i, r), d
+        if best is None:
+            return None
         idx, r = best
 
         def split(offset: float, size: float):
@@ -1211,6 +1224,8 @@ class DocumentCanvasView(QAbstractScrollArea):
     def _apply_zoom_at_anchor(
         self, new_zoom: float, anchor_pos: QPointF, emit_signal: bool
     ):
+        if not self.doc:
+            return
         old_zoom = self.zoom
         new_zoom = max(0.5, min(3.5, float(new_zoom)))
         if abs(new_zoom - old_zoom) < 1e-4:
@@ -1238,7 +1253,7 @@ class DocumentCanvasView(QAbstractScrollArea):
             center_y = self.verticalScrollBar().value() + self.viewport().height() // 2
             self.current_page = max(0, bisect.bisect_right(self.page_y, center_y) - 1)
 
-        if emit_signal:
+        if emit_signal and self.doc:
             self.page_changed.emit(self.current_page, len(self.doc), self.zoom)
         self.viewport().update()
         self._sharp_timer.start()

@@ -1,6 +1,6 @@
 import numpy as np
 import pymupdf
-from PySide6.QtCore import Qt, QRectF
+from PySide6.QtCore import QRectF
 from PySide6.QtGui import QImage, QPixmap, QPainter, QColor, QPen
 
 from app.config import THEMES, HIGHLIGHT_COLORS
@@ -189,31 +189,43 @@ class PageRenderer:
         dpr: float = float(kwargs.get("dpr", 1.0))
         rotation: int = int(kwargs.get("rotation", 0))
 
+        hl_list = None
+
         if len(args) >= 1:
             first = args[0]
             if isinstance(first, pymupdf.Document):
                 doc = first
                 p_idx = int(args[1]) if len(args) >= 2 else int(kwargs.get("page_idx", 0))
-                page = doc.load_page(p_idx)
+                try:
+                    page = doc.load_page(p_idx)
+                except Exception:
+                    page = None
                 if len(args) >= 3 and isinstance(args[2], (int, float)):
                     zoom = float(args[2])
                 if len(args) >= 4 and isinstance(args[3], str):
                     theme_name = args[3]
+                if len(args) >= 5 and isinstance(args[4], (list, tuple)):
+                    hl_list = args[4]
             else:
                 page = first
-                doc = page.parent
-                p_idx = int(page.number)
+                doc = page.parent if page else None
+                p_idx = int(page.number) if page else 0
                 if len(args) >= 2 and isinstance(args[1], (int, float)):
                     zoom = float(args[1])
                 if len(args) >= 3 and isinstance(args[2], str):
                     theme_name = args[2]
                 if len(args) >= 4 and isinstance(args[3], (int, float)):
                     dpr = float(args[3])
+                if len(args) >= 5 and isinstance(args[4], (list, tuple)):
+                    hl_list = args[4]
 
         if page is None:
             page = kwargs.get("page")
             doc = page.parent if page else None
             p_idx = int(page.number) if page else 0
+
+        if page is None:
+            return QPixmap()
 
         active_tts_page = kwargs.get("active_tts_page")
         tts_text = (
@@ -224,11 +236,12 @@ class PageRenderer:
         if active_tts_page is not None and int(active_tts_page) != p_idx:
             tts_text = None
 
-        hl_list = (
-            kwargs.get("user_highlights")
-            if "user_highlights" in kwargs
-            else kwargs.get("highlights", [])
-        )
+        if hl_list is None:
+            hl_list = (
+                kwargs.get("user_highlights")
+                if "user_highlights" in kwargs
+                else kwargs.get("highlights", [])
+            )
         search_query = str(kwargs.get("search_query", "") or "")
 
         effective_scale = max(0.1, zoom * dpr)

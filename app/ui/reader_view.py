@@ -1,6 +1,6 @@
 from pathlib import Path
 import pymupdf
-from PySide6.QtCore import Qt, Signal, QTimer, QPoint, QPointF, QUrl, QRectF, QEvent
+from PySide6.QtCore import Qt, Signal, QTimer, QPoint, QPointF, QSize, QEvent
 from PySide6.QtGui import QColor, QKeySequence, QShortcut
 from PySide6.QtWidgets import (
     QWidget, QVBoxLayout, QHBoxLayout, QSplitter, QTabWidget,
@@ -8,7 +8,6 @@ from PySide6.QtWidgets import (
     QFrame, QLabel, QComboBox, QPushButton, QLineEdit, QSlider,
     QMenu, QFileDialog, QMessageBox, QCheckBox
 )
-from PySide6.QtCore import Qt, Signal, QTimer, QPoint, QPointF, QUrl, QRectF, QEvent, QSize
 
 from app.config import DEFAULT_EPUB_FONTSIZE, TTS_VOICES, HIGHLIGHT_COLORS
 from app.core.epub_loader import open_clean_document
@@ -24,7 +23,6 @@ from app.ui.dialogs import (
 from app.core.tts_worker import (
     NeuralTTSWorker,
     TTSUnit,
-    build_page_units,
 )
 from app.ui.icon import svg_icon
 
@@ -84,7 +82,8 @@ class ReaderView(QWidget):
     def _daemon(self, kind: str) -> DocDaemon:
         d = self._daemons.get(kind)
         if d is None:
-            d = DocDaemon(self.current_book.get("path", ""), self.epub_fontsize, self)
+            path = self.current_book.get("path", "") if self.current_book else ""
+            d = DocDaemon(path, self.epub_fontsize, self)
             d.event.connect(self._on_search_event if kind == "search" else self._on_tts_prep_event)
             self._daemons[kind] = d
         return d
@@ -287,11 +286,6 @@ class ReaderView(QWidget):
         self.combo_voice.currentTextChanged.connect(self._on_voice_changed)
         controls_row.addWidget(self.combo_voice)
 
-        icon_btn_style = (
-            "QPushButton { padding: 0px; font-size: 15px; min-width: 36px; max-width: 36px; "
-            "min-height: 30px; max-height: 30px; }"
-        )
-
         self.btn_prev_sent = QPushButton()
         self.btn_prev_sent.setIcon(svg_icon("skip_back", "#CDD6F4", 15))
         self.btn_prev_sent.setIconSize(QSize(15, 15))
@@ -422,11 +416,18 @@ class ReaderView(QWidget):
         self.shortcut_find_prev = QShortcut(QKeySequence("Ctrl+Shift+G"), self)
         self.shortcut_find_prev.activated.connect(self.find_prev)
 
-        self.shortcut_bookmark = QShortcut(QKeySequence("Ctrl+D"), self)
+        # Bookmark shortcuts: Ctrl+B (requested) and Ctrl+D (traditional browser shortcut)
+        self.shortcut_bookmark = QShortcut(QKeySequence("Ctrl+B"), self)
         self.shortcut_bookmark.activated.connect(self.toggle_bookmark)
+
+        self.shortcut_bookmark_ctrl_d = QShortcut(QKeySequence("Ctrl+D"), self)
+        self.shortcut_bookmark_ctrl_d.activated.connect(self.toggle_bookmark)
 
         self.shortcut_sidebar = QShortcut(QKeySequence("Ctrl+Shift+S"), self)
         self.shortcut_sidebar.activated.connect(self.toggle_sidebar)
+
+        self.shortcut_info = QShortcut(QKeySequence("Ctrl+I"), self)
+        self.shortcut_info.activated.connect(self.open_book_info_dialog)
 
         self.shortcut_reset_zoom = QShortcut(QKeySequence("Ctrl+0"), self)
         self.shortcut_reset_zoom.activated.connect(self.reset_zoom)
@@ -787,6 +788,8 @@ class ReaderView(QWidget):
         if self.doc and self.current_book:
             dlg = BookInfoDialog(self.doc, self.current_book, self.store, self)
             dlg.exec()
+
+    show_book_info = open_book_info_dialog
 
     def set_view_mode(self, mode_label: str):
         mapping = {

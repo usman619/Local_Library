@@ -1,7 +1,6 @@
-import os
 from pathlib import Path
-from PySide6.QtCore import Qt, QByteArray, QSize, QRectF
-from PySide6.QtGui import QIcon, QPixmap, QPainter, QPainterPath, QColor, QGuiApplication
+from PySide6.QtCore import Qt, QByteArray, QRectF
+from PySide6.QtGui import QIcon, QPixmap, QPainter, QGuiApplication
 from PySide6.QtSvg import QSvgRenderer
 
 PROJECT_ROOT = Path(__file__).resolve().parent.parent.parent
@@ -160,7 +159,7 @@ def svg_icon(name: str, color: str = "#CDD6F4", size: int = 16, stroke_width: fl
 def _generate_app_badge_pixmap(size: int = 256) -> QPixmap:
     """Renders a polished Catppuccin Mocha rounded-square app icon with an open book emblem."""
     _ensure_gui_app()
-    badge_svg = f"""
+    badge_svg = """
     <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 256 256">
       <defs>
         <linearGradient id="bgGrad" x1="0%" y1="0%" x2="100%" y2="100%">

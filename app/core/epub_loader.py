@@ -16,7 +16,7 @@ from app.config import (
 try:
     pymupdf.TOOLS.set_small_glyph_heights(True)
     if hasattr(pymupdf.TOOLS, "store_maxsize"):
-        pymupdf.TOOLS.store_maxsize(256 * 1024 * 1024)
+        pymupdf.TOOLS.store_maxsize = 256 * 1024 * 1024
 except Exception:
     pass
 

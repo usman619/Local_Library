@@ -120,7 +120,7 @@ class LocalLibraryWindow(QMainWindow):
         self.btn_toggle_sidebar.setIcon(svg_icon("sidebar", "#CDD6F4", 15))
         self.btn_toggle_sidebar.setIconSize(QSize(15, 15))
         self.btn_toggle_sidebar.setCursor(Qt.PointingHandCursor)
-        self.btn_toggle_sidebar.setToolTip("Show / Hide Contents, Bookmarks & Highlights Sidebar")
+        self.btn_toggle_sidebar.setToolTip("Show / Hide Contents, Bookmarks & Highlights Sidebar (Ctrl+Shift+S)")
         self.btn_toggle_sidebar.clicked.connect(self._on_toggle_sidebar)
         tb_layout.addWidget(self.btn_toggle_sidebar)
 
@@ -178,7 +178,7 @@ class LocalLibraryWindow(QMainWindow):
         self.btn_zoom_in.setIconSize(QSize(15, 15))
         self.btn_zoom_in.setFixedSize(32, 30)
         self.btn_zoom_in.setCursor(Qt.PointingHandCursor)
-        self.btn_zoom_in.setToolTip("Zoom In (Ctrl+=)")
+        self.btn_zoom_in.setToolTip("Zoom In (Ctrl++ / Ctrl+=)")
         self.btn_zoom_in.clicked.connect(lambda: self.reader_view.zoom_in())
         tb_layout.addWidget(self.btn_zoom_in)
 
@@ -186,7 +186,7 @@ class LocalLibraryWindow(QMainWindow):
         self.btn_bookmark.setIcon(svg_icon("bookmark", "#F9E2AF", 14))
         self.btn_bookmark.setIconSize(QSize(14, 14))
         self.btn_bookmark.setCursor(Qt.PointingHandCursor)
-        self.btn_bookmark.setToolTip("Toggle Bookmark on Current Page (Ctrl+D)")
+        self.btn_bookmark.setToolTip("Toggle Bookmark on Current Page (Ctrl+B / Ctrl+D)")
         self.btn_bookmark.clicked.connect(lambda: self.reader_view.toggle_bookmark())
         tb_layout.addWidget(self.btn_bookmark)
 
@@ -202,7 +202,7 @@ class LocalLibraryWindow(QMainWindow):
         self.btn_info.setIcon(svg_icon("info", "#89DCEB", 14))
         self.btn_info.setIconSize(QSize(14, 14))
         self.btn_info.setCursor(Qt.PointingHandCursor)
-        self.btn_info.setToolTip("View Book Metadata & File Details")
+        self.btn_info.setToolTip("View Book Metadata & File Details (Ctrl+I)")
         self.btn_info.clicked.connect(self._show_book_info_dialog)
         tb_layout.addWidget(self.btn_info)
 
@@ -261,20 +261,7 @@ class LocalLibraryWindow(QMainWindow):
 
     def _setup_shortcuts(self):
         QShortcut(QKeySequence("Ctrl+O"), self, activated=self.import_multiple_files_dialog)
-        QShortcut(QKeySequence("Ctrl+F"), self, activated=self._shortcut_find)
-        QShortcut(QKeySequence("Ctrl+D"), self, activated=self._shortcut_bookmark)
-        QShortcut(QKeySequence("Ctrl+="), self, activated=lambda: self.reader_view.zoom_in())
-        QShortcut(QKeySequence("Ctrl++"), self, activated=lambda: self.reader_view.zoom_in())
-        QShortcut(QKeySequence("Ctrl+-"), self, activated=lambda: self.reader_view.zoom_out())
         QShortcut(QKeySequence("Escape"), self, activated=self._shortcut_escape)
-
-    def _shortcut_find(self):
-        if self.stack.currentIndex() == 1:
-            self.reader_view.open_search_bar()
-
-    def _shortcut_bookmark(self):
-        if self.stack.currentIndex() == 1:
-            self.reader_view.toggle_bookmark()
 
     def _shortcut_escape(self):
         if self.stack.currentIndex() == 1:
@@ -351,11 +338,19 @@ class LocalLibraryWindow(QMainWindow):
         self.reader_view.set_view_mode(self.combo_view_mode.currentText())
 
         self.stack.setCurrentIndex(1)
-        self.reader_view.load_book(filepath)
+        ok = self.reader_view.load_book(filepath)
+        if not ok:
+            self.show_library_view()
+            return
+
         if hasattr(self.reader_view, "_emit_status"):
             self.reader_view._emit_status()
 
-        book_info = self.store.books.get(filepath) or {}
+        book_info = (
+            getattr(self.reader_view, "current_book", None)
+            or self.store.books.get(self.store.book_id(filepath))
+            or {}
+        )
         title = book_info.get("title") or Path(filepath).stem
         self.setWindowTitle(f"{title} — LocalLibrary")
 
@@ -495,7 +490,7 @@ class LocalLibraryWindow(QMainWindow):
         )
 
     def remove_book_from_library(self, filepath: str):
-        book = self.store.books.get(filepath) or {}
+        book = self.store.books.get(self.store.book_id(filepath)) or {}
         title = book.get("title") or Path(filepath).name
         reply = QMessageBox.question(
             self,

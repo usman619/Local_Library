@@ -23,7 +23,6 @@ a new search query supersedes the previous one without any bookkeeping on the GU
 When the parent exits, stdin closes and this process exits too (no orphans).
 """
 import json
-import os
 import queue
 import sys
 import threading
