@@ -5,7 +5,8 @@ from PySide6.QtGui import QFont, QDesktopServices, QAction
 from PySide6.QtWidgets import (
     QWidget, QVBoxLayout, QHBoxLayout, QLabel, QLineEdit,
     QComboBox, QScrollArea, QGridLayout, QFrame, QPushButton,
-    QSizePolicy, QMenu, QInputDialog, QMessageBox
+    QSizePolicy, QMenu, QInputDialog, QMessageBox, QListWidget,
+    QListWidgetItem, QWidgetAction
 )
 
 from app.ui.widgets import BookCardWidget
@@ -467,7 +468,8 @@ class LibraryView(QWidget):
                 padding: 6px;
             }
             QMenu::item {
-                padding: 6px 16px;
+                padding: 5px 16px;
+                min-height: 24px;
                 border-radius: 5px;
             }
             QMenu::item:selected {
@@ -482,22 +484,94 @@ class LibraryView(QWidget):
             }
         """)
 
+        act_open = QAction(
+            svg_icon("book_open", "#89B4FA", 14),
+            "Open Book",
+            menu,
+        )
+        act_open.triggered.connect(
+            lambda _chk=False, bp=book_path: self.book_selected.emit(bp)
+        )
+        menu.addAction(act_open)
+        menu.addSeparator()
+
         header_act = QAction(svg_icon("folder_open", "#F9E2AF", 14), f"Current: {cur_cat or 'Uncategorized'}", menu)
         header_act.setEnabled(False)
         menu.addAction(header_act)
         menu.addSeparator()
 
+        category_header = QAction(
+            svg_icon("folder", "#89B4FA", 14),
+            "Assign to Category",
+            menu,
+        )
+        category_header.setEnabled(False)
+        menu.addAction(category_header)
+
+        category_list = QListWidget(menu)
+        category_list.setUniformItemSizes(True)
+        category_list.setFixedSize(260, 5 * 30 + 4)
+        category_list.setFocusPolicy(Qt.StrongFocus)
+        category_list.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
+        category_list.setVerticalScrollBarPolicy(Qt.ScrollBarAsNeeded)
+        category_list.setStyleSheet("""
+            QListWidget {
+                background: #1E1E2E;
+                color: #CDD6F4;
+                border: 1px solid #45475A;
+                border-radius: 6px;
+                padding: 2px;
+                outline: none;
+            }
+            QListWidget::item {
+                min-height: 28px;
+                padding: 3px 8px;
+                border-radius: 4px;
+            }
+            QListWidget::item:hover {
+                background: #313244;
+                color: #89B4FA;
+            }
+            QScrollBar:vertical {
+                background: #11111B;
+                width: 8px;
+                margin: 2px;
+                border-radius: 4px;
+            }
+            QScrollBar::handle:vertical {
+                background: #585B70;
+                min-height: 24px;
+                border-radius: 4px;
+            }
+            QScrollBar::handle:vertical:hover {
+                background: #89B4FA;
+            }
+            QScrollBar::add-line:vertical, QScrollBar::sub-line:vertical {
+                height: 0;
+            }
+        """)
         for f_name in self._folders_list:
             is_cur = f_name == cur_cat
-            ic = svg_icon("check", "#A6E3A1", 14) if is_cur else svg_icon("folder", "#89B4FA", 14)
-            act = QAction(ic, f"Assign to '{f_name}'", menu)
-            if is_cur:
-                act.setEnabled(False)
-            else:
-                act.triggered.connect(
-                    lambda _chk=False, bp=book_path, fn=f_name: self._execute_move_book(bp, fn)
-                )
-            menu.addAction(act)
+            item = QListWidgetItem(
+                svg_icon("check", "#A6E3A1", 14)
+                if is_cur
+                else svg_icon("folder", "#89B4FA", 14),
+                f"Assign to '{f_name}'",
+            )
+            item.setData(Qt.UserRole, f_name)
+            item.setFlags(item.flags() & ~Qt.ItemIsEnabled if is_cur else item.flags())
+            category_list.addItem(item)
+
+        def assign_category(item: QListWidgetItem):
+            folder_name = item.data(Qt.UserRole)
+            if folder_name and folder_name != cur_cat:
+                self._execute_move_book(book_path, folder_name)
+            menu.close()
+
+        category_list.itemClicked.connect(assign_category)
+        category_action = QWidgetAction(menu)
+        category_action.setDefaultWidget(category_list)
+        menu.addAction(category_action)
 
         if cur_cat:
             act_uncat = QAction(

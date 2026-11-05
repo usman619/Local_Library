@@ -88,12 +88,16 @@ def main():
     window = LocalLibraryWindow()
     window.show()
 
-    # If a book file was passed as a CLI argument (e.g. from file manager), open it directly
-    for arg in sys.argv[1:]:
-        if not arg.startswith("-") and os.path.exists(arg):
-            if Path(arg).suffix.lower() in SUPPORTED_EXTENSIONS:
-                window.open_book(os.path.abspath(arg))
-                break
+    # File managers pass all selected files after the desktop entry's %F token.
+    # Open each supported path as a separate lazy reader tab.
+    filepaths = [
+        os.path.abspath(arg)
+        for arg in sys.argv[1:]
+        if not arg.startswith("-")
+        and os.path.isfile(arg)
+        and Path(arg).suffix.lower() in SUPPORTED_EXTENSIONS
+    ]
+    window.open_books(filepaths)
 
     sys.exit(app.exec())
 

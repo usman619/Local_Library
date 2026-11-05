@@ -18,6 +18,9 @@ from PySide6.QtWidgets import (
     QFormLayout,
     QProgressDialog,
     QApplication,
+    QTabWidget,
+    QTabBar,
+    QToolButton,
 )
 
 from app.config import THEMES, SUPPORTED_EXTENSIONS, GLOBAL_QSS
@@ -43,6 +46,14 @@ class LocalLibraryWindow(QMainWindow):
         self._build_ui()
         self._setup_shortcuts()
         self.show_library_view()
+
+    @property
+    def reader_view(self) -> ReaderView | None:
+        """Return the active reader without keeping duplicate document instances."""
+        if not hasattr(self, "reader_tabs"):
+            return None
+        widget = self.reader_tabs.currentWidget()
+        return widget if isinstance(widget, ReaderView) else None
 
     def _build_ui(self):
         central = QWidget()
@@ -228,13 +239,18 @@ class LocalLibraryWindow(QMainWindow):
 
         root_layout.addWidget(self.top_bar)
 
-        # ---- Main Stacked Area (0 = LibraryView, 1 = ReaderView) ----
+        # ---- Main Stacked Area (0 = LibraryView, 1 = Reader tabs) ----
         self.stack = QStackedWidget()
         self.library_view = LibraryView()
-        self.reader_view = ReaderView(self.store)
+        self.reader_tabs = QTabWidget()
+        self.reader_tabs.setTabsClosable(True)
+        self.reader_tabs.setDocumentMode(True)
+        self.reader_tabs.setMovable(True)
+        self.reader_tabs.tabCloseRequested.connect(self._close_reader_tab)
+        self.reader_tabs.currentChanged.connect(self._on_reader_tab_changed)
 
         self.stack.addWidget(self.library_view)
-        self.stack.addWidget(self.reader_view)
+        self.stack.addWidget(self.reader_tabs)
         root_layout.addWidget(self.stack, stretch=1)
 
         # Connect LibraryView signals
@@ -248,9 +264,6 @@ class LocalLibraryWindow(QMainWindow):
         self.library_view.move_book_requested.connect(self._on_move_book_to_folder)
 
         # Connect ReaderView signals
-        self.reader_view.status_updated.connect(self._on_reader_status_updated)
-        if hasattr(self.reader_view, "book_closed"):
-            self.reader_view.book_closed.connect(self.show_library_view)
 
     @staticmethod
     def _create_separator() -> QFrame:
@@ -267,9 +280,10 @@ class LocalLibraryWindow(QMainWindow):
 
     def _shortcut_escape(self):
         if self.stack.currentIndex() == 1:
-            if hasattr(self.reader_view, "search_bar") and self.reader_view.search_bar.isVisible():
+            reader = self.reader_view
+            if reader and reader.search_bar.isVisible():
                 self.reader_view.search_bar.hide()
-                self.reader_view.canvas.set_search_query("")
+                reader.canvas.set_search_query("")
             else:
                 self.show_library_view()
 
@@ -300,8 +314,71 @@ class LocalLibraryWindow(QMainWindow):
             w.setVisible(visible)
 
     def _on_reader_status_updated(self, text: str):
+        if self.reader_view is not None and self.sender() is not self.reader_view:
+            return
         self.lbl_page_status.setText(text)
         self.lbl_page_status.setVisible(bool(text.strip()) and self.stack.currentIndex() == 1)
+
+    def _on_reader_tab_changed(self, index: int):
+        reader = self.reader_view
+        if reader is None:
+            self.lbl_page_status.clear()
+            return
+        self._set_library_controls_visible(False)
+        self._set_reader_controls_visible(True)
+        if reader.current_book:
+            title = reader.current_book.get("title") or Path(
+                reader.current_book.get("path", "")
+            ).stem
+            self.setWindowTitle(f"{title} — LocalLibrary")
+            reader._emit_status()
+
+    def _close_reader_tab(self, index: int):
+        widget = self.reader_tabs.widget(index)
+        if not isinstance(widget, ReaderView):
+            return
+        widget.close_book()
+        self.reader_tabs.removeTab(index)
+        widget.deleteLater()
+        if self.reader_tabs.count() == 0:
+            self.show_library_view()
+
+    def _install_tab_close_button(self, reader: ReaderView):
+        """Install a larger, theme-consistent close target for one reader tab."""
+        index = self.reader_tabs.indexOf(reader)
+        if index < 0:
+            return
+        close_button = QToolButton()
+        close_button.setIcon(svg_icon("close", "#A6ADC8", 12))
+        close_button.setIconSize(QSize(12, 12))
+        close_button.setFixedSize(22, 22)
+        close_button.setCursor(Qt.PointingHandCursor)
+        close_button.setFocusPolicy(Qt.NoFocus)
+        close_button.setAutoRaise(True)
+        close_button.setToolTip("Close book tab")
+        close_button.setStyleSheet("""
+            QToolButton {
+                background: transparent;
+                border: none;
+                border-radius: 6px;
+                padding: 3px;
+                margin: 0 3px 0 0;
+            }
+            QToolButton:hover {
+                background: #3B232E;
+            }
+            QToolButton:pressed {
+                background: #F38BA8;
+            }
+        """)
+        close_button.clicked.connect(
+            lambda _checked=False, target=reader: self._close_reader_tab(
+                self.reader_tabs.indexOf(target)
+            )
+        )
+        self.reader_tabs.tabBar().setTabButton(
+            index, QTabBar.ButtonPosition.RightSide, close_button
+        )
 
     # ---- VIEW SWITCHING ----
 
@@ -313,7 +390,6 @@ class LocalLibraryWindow(QMainWindow):
         )
 
     def show_library_view(self):
-        self.reader_view.close_book()
         self.lbl_page_status.setText("")
         self._set_reader_controls_visible(False)
         self._set_library_controls_visible(True)
@@ -332,29 +408,58 @@ class LocalLibraryWindow(QMainWindow):
             )
             return
 
+        normalized_path = os.path.abspath(filepath)
+        for index in range(self.reader_tabs.count()):
+            reader = self.reader_tabs.widget(index)
+            if isinstance(reader, ReaderView) and reader.current_book:
+                if os.path.abspath(reader.current_book.get("path", "")) == normalized_path:
+                    self.reader_tabs.setCurrentIndex(index)
+                    self.stack.setCurrentIndex(1)
+                    return
+
         self._set_library_controls_visible(False)
         self._set_reader_controls_visible(True)
 
         # Apply saved theme & view mode before loading
-        self.reader_view.set_theme(self.combo_theme.currentText())
-        self.reader_view.set_view_mode(self.combo_view_mode.currentText())
+        reader = ReaderView(self.store)
+        reader.set_theme(self.combo_theme.currentText())
+        reader.set_view_mode(self.combo_view_mode.currentText())
+        reader.status_updated.connect(self._on_reader_status_updated)
+        tab_index = self.reader_tabs.addTab(reader, Path(filepath).stem)
+        self._install_tab_close_button(reader)
+        self.reader_tabs.setCurrentIndex(tab_index)
 
         self.stack.setCurrentIndex(1)
-        ok = self.reader_view.load_book(filepath)
+        ok = reader.load_book(filepath)
         if not ok:
-            self.show_library_view()
+            self._close_reader_tab(tab_index)
             return
 
-        if hasattr(self.reader_view, "_emit_status"):
-            self.reader_view._emit_status()
+        if hasattr(reader, "_emit_status"):
+            reader._emit_status()
 
         book_info = (
-            getattr(self.reader_view, "current_book", None)
+            getattr(reader, "current_book", None)
             or self.store.books.get(self.store.book_id(filepath))
             or {}
         )
         title = book_info.get("title") or Path(filepath).stem
+        self.reader_tabs.setTabText(tab_index, title)
         self.setWindowTitle(f"{title} — LocalLibrary")
+
+    def open_books(self, filepaths: list[str]):
+        """Open several files as tabs, reusing tabs that are already open."""
+        supported = [
+            os.path.abspath(path)
+            for path in filepaths
+            if path
+            and os.path.isfile(path)
+            and Path(path).suffix.lower() in SUPPORTED_EXTENSIONS
+        ]
+        if not supported:
+            return
+        for filepath in supported:
+            self.open_book(filepath)
 
     # ---- READER TOOLBAR ACTIONS ----
 
@@ -367,11 +472,13 @@ class LocalLibraryWindow(QMainWindow):
 
     def _on_view_mode_changed(self, mode_text: str):
         self.store.save_settings(view_mode=mode_text)
-        self.reader_view.set_view_mode(mode_text)
+        if self.reader_view:
+            self.reader_view.set_view_mode(mode_text)
 
     def _on_theme_changed(self, theme_name: str):
         self.store.save_settings(theme_name=theme_name)
-        self.reader_view.set_theme(theme_name)
+        if self.reader_view:
+            self.reader_view.set_theme(theme_name)
 
     def _show_book_info_dialog(self):
         if hasattr(self.reader_view, "show_book_info"):
@@ -501,6 +608,7 @@ class LocalLibraryWindow(QMainWindow):
         progress.close()
         if added:
             self._refresh_library_grid()
+            self.open_books(files)
 
     def import_multiple_folders_dialog(self):
         dialog = QFileDialog(self, "Select Folder to Scan for Books", str(Path.home()))
@@ -563,6 +671,9 @@ class LocalLibraryWindow(QMainWindow):
             self._refresh_library_grid()
 
     def closeEvent(self, event):
-        self.reader_view.close_book()
+        for index in range(self.reader_tabs.count()):
+            reader = self.reader_tabs.widget(index)
+            if isinstance(reader, ReaderView):
+                reader.close_book()
         self.store.save()
         super().closeEvent(event)
