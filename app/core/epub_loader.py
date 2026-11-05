@@ -52,6 +52,16 @@ def _sanitize_css_text(css_text: str) -> str:
         css_text,
     )
 
+    # MuPDF does not load embedded publisher fonts. Malformed @font-face
+    # declarations (especially `src: url >(<...`) otherwise produce noisy
+    # parser errors even though the document can still be laid out.
+    css_text = re.sub(
+        r"@font-face\s*\{[^{}]*\}",
+        "",
+        css_text,
+        flags=re.IGNORECASE | re.DOTALL,
+    )
+
     # Remove @page rules
     css_text = re.sub(r"@page\s*[^{]*\{[^}]*\}", "", css_text, flags=re.IGNORECASE | re.DOTALL)
 
@@ -91,30 +101,38 @@ def _sanitize_xhtml_bytes(
 
 def _get_cached_sanitized_epub(filepath: str) -> str:
     """Returns path to a disk-cached EPUB with Foliate-style reader CSS."""
-    abs_path = os.path.abspath(filepath)
+    abs_path = os.path.realpath(os.path.abspath(filepath))
     st = os.stat(abs_path)
-    # 'v10' invalidates output generated before the final CSS compatibility fix.
-    cache_key = f"v10:{abs_path}:{st.st_mtime_ns}:{st.st_size}"
+    # 'v11' invalidates output generated before font-face sanitization.
+    cache_key = f"v11:{abs_path}:{st.st_mtime_ns}:{st.st_size}"
     digest = hashlib.sha1(cache_key.encode("utf-8")).hexdigest()[:20]
     cached_epub = SANITIZED_EPUB_CACHE_DIR / f"{digest}.epub"
 
-    if cached_epub.exists() and cached_epub.stat().st_size > 0:
+    if (
+        cached_epub.exists()
+        and cached_epub.stat().st_size > 0
+        and zipfile.is_zipfile(cached_epub)
+    ):
         return str(cached_epub)
 
-    with zipfile.ZipFile(abs_path, "r") as zin:
-        with zipfile.ZipFile(cached_epub, "w", compression=zipfile.ZIP_STORED) as zout:
-            for item in zin.infolist():
-                data = zin.read(item.filename)
-                lower_name = item.filename.lower()
-                if lower_name.endswith(".css"):
-                    data = _sanitize_css_bytes(data)
-                elif lower_name.endswith((".xhtml", ".html", ".htm")):
-                    data = _sanitize_xhtml_bytes(
-                        data, item.filename.replace("\\", "/")
-                    )
-                # Always pass item.filename (str) instead of item (ZipInfo) so zipfile
-                # computes fresh file_size & CRC32 headers without leaving trailing bytes!
-                zout.writestr(item.filename, data)
+    tmp_path = cached_epub.with_name(cached_epub.name + ".tmp")
+    try:
+        with zipfile.ZipFile(abs_path, "r") as zin:
+            with zipfile.ZipFile(tmp_path, "w", compression=zipfile.ZIP_STORED) as zout:
+                for item in zin.infolist():
+                    data = zin.read(item.filename)
+                    lower_name = item.filename.lower()
+                    if lower_name.endswith(".css"):
+                        data = _sanitize_css_bytes(data)
+                    elif lower_name.endswith((".xhtml", ".html", ".htm")):
+                        data = _sanitize_xhtml_bytes(
+                            data, item.filename.replace("\\", "/")
+                        )
+                    zout.writestr(item.filename, data)
+        os.replace(tmp_path, cached_epub)
+    finally:
+        if tmp_path.exists():
+            tmp_path.unlink()
 
     return str(cached_epub)
 

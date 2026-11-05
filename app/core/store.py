@@ -4,8 +4,10 @@ import json
 import hashlib
 import zipfile
 import shutil
+import posixpath
 from pathlib import Path
 from datetime import datetime
+from urllib.parse import unquote
 import pymupdf
 
 from app.core.epub_loader import open_clean_document
@@ -99,8 +101,14 @@ class LibraryStore:
         try:
             with zipfile.ZipFile(filepath, "r") as zf:
                 names = zf.namelist()
-                img_exts = (".jpg", ".jpeg", ".png", ".webp")
-                image_files = [n for n in names if n.lower().endswith(img_exts)]
+                img_exts = (".jpg", ".jpeg", ".png", ".webp", ".svg")
+                name_map = {
+                    posixpath.normpath(unquote(n.replace("\\", "/"))): n for n in names
+                }
+                image_files = [
+                    n for n in names
+                    if n.lower().endswith(img_exts)
+                ]
                 if not image_files:
                     return None
 
@@ -109,15 +117,44 @@ class LibraryStore:
                 for opf_name in opf_files:
                     opf_text = zf.read(opf_name).decode("utf-8", errors="ignore")
                     opf_dir = os.path.dirname(opf_name)
-                    # Look for <item ... properties="cover-image" href="..."/> or id="cover..."
+                    cover_ids: set[str] = set()
+                    cover_hrefs: set[str] = set()
+                    for meta_match in re.finditer(r"<meta\b[^>]+>", opf_text, re.IGNORECASE):
+                        meta_tag = meta_match.group(0)
+                        attrs = dict(re.findall(
+                            r'([\w:-]+)\s*=\s*["\']([^"\']*)["\']',
+                            meta_tag,
+                            re.IGNORECASE,
+                        ))
+                        if attrs.get("name", "").lower() == "cover" and attrs.get("content"):
+                            content = unquote(attrs["content"]).replace("\\", "/")
+                            cover_ids.add(content)
+                            cover_hrefs.add(posixpath.normpath(
+                                posixpath.join(opf_dir.replace("\\", "/"), content)
+                            ))
                     for match in re.finditer(r"<item\b[^>]+>", opf_text, re.IGNORECASE):
                         tag = match.group(0)
-                        if "cover" in tag.lower() and any(ext in tag.lower() for ext in img_exts):
-                            href_m = re.search(r'href\s*=\s*["\']([^"\']+)["\']', tag, re.IGNORECASE)
-                            if href_m:
-                                candidate = os.path.normpath(os.path.join(opf_dir, href_m.group(1))).replace("\\", "/")
-                                if candidate in names:
-                                    return zf.read(candidate)
+                        item_id = re.search(r'\bid\s*=\s*["\']([^"\']+)["\']', tag, re.IGNORECASE)
+                        href_m = re.search(
+                            r'href\s*=\s*["\']([^"\']+)["\']', tag, re.IGNORECASE
+                        )
+                        item_href = ""
+                        if href_m:
+                            item_href = posixpath.normpath(posixpath.join(
+                                opf_dir.replace("\\", "/"), unquote(href_m.group(1))
+                            ))
+                        is_cover = (
+                            "cover-image" in tag.lower()
+                            or (item_id and item_id.group(1) in cover_ids)
+                            or "cover" in (item_id.group(1).lower() if item_id else "")
+                            or item_href in cover_hrefs
+                        )
+                        if not is_cover:
+                            continue
+                        if href_m:
+                            archive_name = name_map.get(item_href)
+                            if archive_name and archive_name.lower().endswith(img_exts):
+                                return zf.read(archive_name)
 
                 # 2. Fallback: any image with 'cover' in its filename
                 for img_name in image_files:
@@ -147,7 +184,19 @@ class LibraryStore:
                     pix.save(str(cover_path))
                     return
                 except Exception:
-                    pass
+                    if raw_bytes.lstrip().lower().startswith(
+                        (b"<svg", b"<?xml")
+                    ):
+                        try:
+                            with pymupdf.open(
+                                stream=raw_bytes, filetype="svg"
+                            ) as svg_doc:
+                                svg_doc[0].get_pixmap(matrix=pymupdf.Matrix(2, 2)).save(
+                                    str(cover_path)
+                                )
+                                return
+                        except Exception:
+                            pass
 
         # 2. Check if Page 0 has an embedded full-cover image we can extract cleanly
         if len(doc) > 0:
@@ -164,7 +213,11 @@ class LibraryStore:
                         return
 
                 # 3. Standard PDF / fallback page render
-                pix = page.get_pixmap(matrix=pymupdf.Matrix(0.75, 0.75), alpha=False)
+                pix = page.get_pixmap(
+                    matrix=pymupdf.Matrix(0.75, 0.75),
+                    alpha=False,
+                    annots=False,
+                )
                 pix.save(str(cover_path))
             except Exception:
                 pass
@@ -220,7 +273,8 @@ class LibraryStore:
             "publisher": publisher or existing.get("publisher", ""),
             "format": Path(filepath).suffix.upper().lstrip("."),
             "cover": str(cover_path),
-            "cover_v2": True,
+            "cover_v2": cover_path.exists(),
+            "cover_version": 4 if cover_path.exists() else 0,
             "current_page": existing.get("current_page", 0),
             "total_pages": max(1, total_pages),
             "word_count": existing.get("word_count", 0),
@@ -252,18 +306,27 @@ class LibraryStore:
         """Upgrades any existing EPUB book cards that still have old v1 white-box covers."""
         updated = False
         for bid, book in list(self.books.items()):
-            if book.get("format") == "EPUB" and not book.get("cover_v2", False):
+            if book.get("format") == "EPUB" and book.get("cover_version", 0) < 4:
                 path = book.get("path", "")
                 if os.path.exists(path):
                     raw_bytes = self._extract_epub_cover_bytes(path)
                     if raw_bytes:
                         try:
                             cover_path = Path(book.get("cover", self.covers_dir / f"{bid}.png"))
-                            pix = pymupdf.Pixmap(raw_bytes)
-                            if pix.n - pix.alpha > 3:
-                                pix = pymupdf.Pixmap(pymupdf.csRGB, pix)
-                            pix.save(str(cover_path))
+                            try:
+                                pix = pymupdf.Pixmap(raw_bytes)
+                                if pix.n - pix.alpha > 3:
+                                    pix = pymupdf.Pixmap(pymupdf.csRGB, pix)
+                                pix.save(str(cover_path))
+                            except Exception:
+                                with pymupdf.open(
+                                    stream=raw_bytes, filetype="svg"
+                                ) as svg_doc:
+                                    svg_doc[0].get_pixmap(
+                                        matrix=pymupdf.Matrix(2, 2)
+                                    ).save(str(cover_path))
                             book["cover_v2"] = True
+                            book["cover_version"] = 4
                             updated = True
                         except Exception:
                             pass

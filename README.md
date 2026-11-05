@@ -1,5 +1,9 @@
 # LocalLibrary
 
+![License](https://img.shields.io/badge/license-GPLv3-blue.svg)
+![Platform](https://img.shields.io/badge/platform-Linux-lightgrey.svg)
+![Python](https://img.shields.io/badge/python-3.10%2B-blue.svg)
+
 <p align="center">
   <img src="images/app_icon.png" alt="LocalLibrary App Icon" width="128" height="128">
 </p>
@@ -44,16 +48,13 @@ To run LocalLibrary on your Linux system, ensure you have the following installe
 ```bash
 # Clone the repository
 git clone https://github.com/usman619/Local_Library.git
-cd local_library
+cd Local_Library
 
 # Create and activate a virtual environment (or conda env)
 python -m venv venv
 source venv/bin/activate
 
-# Install dependencies
-pip install PySide6 pymupdf numpy edge-tts
-
-# Install requirements
+# Install runtime dependencies
 pip install -r requirements.txt
 ```
 
@@ -162,9 +163,25 @@ To install LocalLibrary into your Linux application launcher menu with the custo
 ```bash
 python install_desktop.py
 ```
-To uninstall LocalLibrary from your linux application launcher menu:
+
+The installer binds the launcher to the Python interpreter used to run it. Run it
+from the activated environment where the dependencies are installed.
+
+To uninstall LocalLibrary from your Linux application launcher menu:
+
 ```bash
 python uninstall_desktop.py
 ```
+
+### Building a source distribution
+
+```bash
+python -m pip install --upgrade build
+python -m build --sdist
+```
+
+The application is intended to run from its source checkout on Linux. The
+desktop installer remains the supported installation path because it preserves
+the application assets and optional system audio tools used by TTS.
 ## License
 Distributed under the GPLv3 License. See [LICENSE](LICENSE) for more information.

@@ -1,0 +1,38 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "local-library"
+version = "1.0.0"
+description = "A native Linux eBook and PDF reader with annotations and text-to-speech."
+readme = "README.md"
+requires-python = ">=3.10"
+license = { file = "LICENSE" }
+authors = [
+    { name = "Usman619" },
+]
+dependencies = [
+    "PySide6>=6.6.0",
+    "PyMuPDF>=1.24.0",
+    "numpy>=1.26.0",
+    "sounddevice>=0.4.6",
+    "soundfile>=0.12.1",
+    "edge-tts>=6.1.12",
+]
+
+[project.urls]
+Homepage = "https://github.com/usman619/Local_Library"
+Issues = "https://github.com/usman619/Local_Library/issues"
+
+[tool.setuptools]
+py-modules = ["main", "install_desktop", "uninstall_desktop"]
+
+[tool.setuptools.packages.find]
+include = ["app*"]
+
+[tool.setuptools.data-files]
+"share/local-library/images" = [
+    "images/*.png",
+    "images/*.svg",
+]

@@ -1,6 +1,6 @@
 import os
 from pathlib import Path
-from PySide6.QtCore import Qt, QSize
+from PySide6.QtCore import Qt, QSize, QUrl
 from PySide6.QtGui import QKeySequence, QShortcut
 from PySide6.QtWidgets import (
     QMainWindow,
@@ -16,6 +16,8 @@ from PySide6.QtWidgets import (
     QFrame,
     QDialog,
     QFormLayout,
+    QProgressDialog,
+    QApplication,
 )
 
 from app.config import THEMES, SUPPORTED_EXTENSIONS, GLOBAL_QSS
@@ -447,40 +449,96 @@ class LocalLibraryWindow(QMainWindow):
 
     # ---- BOOK IMPORT & REMOVAL DIALOGS ----
 
+    @staticmethod
+    def _file_dialog_sidebar_urls() -> list[QUrl]:
+        """Expose the standard Linux removable-media mount points in file dialogs."""
+        candidates = [
+            Path("/media") / os.environ.get("USER", ""),
+            Path("/run/media") / os.environ.get("USER", ""),
+            Path("/mnt"),
+        ]
+        urls: list[QUrl] = []
+        seen: set[str] = set()
+        for root in candidates:
+            if not root.is_dir():
+                continue
+            for path in (root, *root.iterdir()):
+                if path.is_dir():
+                    resolved = str(path.resolve())
+                    if resolved not in seen:
+                        seen.add(resolved)
+                        urls.append(QUrl.fromLocalFile(resolved))
+        return urls
+
     def import_multiple_files_dialog(self):
         exts = " ".join(f"*{ext}" for ext in sorted(SUPPORTED_EXTENSIONS))
-        files, _ = QFileDialog.getOpenFileNames(
-            self,
-            "Add eBooks & PDFs to Library",
-            str(Path.home()),
-            f"Supported Books ({exts});;All Files (*)",
-        )
+        dialog = QFileDialog(self, "Add eBooks & PDFs to Library", str(Path.home()))
+        dialog.setFileMode(QFileDialog.ExistingFiles)
+        dialog.setNameFilters([f"Supported Books ({exts})", "All Files (*)"])
+        dialog.setSidebarUrls(self._file_dialog_sidebar_urls())
+        if not dialog.exec():
+            return
+        files = dialog.selectedFiles()
         if not files:
             return
+        progress = QProgressDialog("Adding books to your library...", "Cancel", 0, len(files), self)
+        progress.setWindowTitle("Loading Books")
+        progress.setWindowModality(Qt.WindowModal)
+        progress.setMinimumDuration(0)
+        progress.setAutoClose(False)
+        progress.show()
+        QApplication.processEvents()
         added = 0
-        for fpath in files:
+        for index, fpath in enumerate(files, 1):
+            if progress.wasCanceled():
+                break
             if Path(fpath).suffix.lower() in SUPPORTED_EXTENSIONS:
                 self.store.add_or_update_book(fpath)
                 added += 1
+            progress.setValue(index)
+            progress.setLabelText(f"Loading book {index} of {len(files)}...")
+            QApplication.processEvents()
+        progress.close()
         if added:
             self._refresh_library_grid()
 
     def import_multiple_folders_dialog(self):
-        folder = QFileDialog.getExistingDirectory(
-            self,
-            "Select Folder to Scan for Books",
-            str(Path.home()),
-        )
-        if not folder:
+        dialog = QFileDialog(self, "Select Folder to Scan for Books", str(Path.home()))
+        dialog.setFileMode(QFileDialog.Directory)
+        dialog.setOption(QFileDialog.ShowDirsOnly, True)
+        dialog.setSidebarUrls(self._file_dialog_sidebar_urls())
+        if not dialog.exec():
             return
+        folders = dialog.selectedFiles()
+        if not folders:
+            return
+        folder = folders[0]
 
+        book_paths = [
+            os.path.join(root, fname)
+            for root, _dirs, files in os.walk(folder)
+            for fname in files
+            if Path(fname).suffix.lower() in SUPPORTED_EXTENSIONS
+        ]
+        progress = QProgressDialog(
+            "Scanning and adding books...", "Cancel", 0, len(book_paths), self
+        )
+        progress.setWindowTitle("Loading Books")
+        progress.setWindowModality(Qt.WindowModal)
+        progress.setMinimumDuration(0)
+        progress.setAutoClose(False)
+        progress.show()
+        QApplication.processEvents()
         added = 0
-        for root, _dirs, files in os.walk(folder):
-            for fname in files:
-                if Path(fname).suffix.lower() in SUPPORTED_EXTENSIONS:
-                    full_path = os.path.join(root, fname)
-                    self.store.add_or_update_book(full_path)
-                    added += 1
+        for index, full_path in enumerate(book_paths, 1):
+            if progress.wasCanceled():
+                break
+            self.store.add_or_update_book(full_path)
+            added += 1
+            progress.setValue(index)
+            progress.setLabelText(f"Loading book {index} of {len(book_paths)}...")
+            QApplication.processEvents()
+        progress.close()
 
         self._refresh_library_grid()
         QMessageBox.information(

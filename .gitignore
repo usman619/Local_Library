@@ -2,3 +2,13 @@
 .vscode
 pyrightconfig.json
 **/__pycache__/
+.agents/
+.gemini/
+.pytest_cache/
+*.py[cod]
+build/
+dist/
+*.egg-info/
+.coverage
+htmlcov/
+.github/

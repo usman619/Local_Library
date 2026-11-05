@@ -249,7 +249,16 @@ class PageRenderer:
         if rotation:
             mat = mat.prerotate(rotation)
 
-        pix = page.get_pixmap(matrix=mat, alpha=False)
+        # Force RGB output: EPUB cover pages can be SVG/transparent and PyMuPDF's
+        # default colorspace otherwise varies between document backends.
+        # Do not ask MuPDF to synthesize appearance streams for malformed or
+        # unsupported embedded annotations. The reader draws its own highlights.
+        pix = page.get_pixmap(
+            matrix=mat,
+            colorspace=pymupdf.csRGB,
+            alpha=False,
+            annots=False,
+        )
         theme_spec = THEMES.get(theme_name)
 
         if theme_spec is None:
