@@ -11,6 +11,7 @@ from PySide6.QtWidgets import (
 
 from app.ui.widgets import BookCardWidget
 from app.ui.icon import _load_clean_pixmap, svg_icon, svg_pixmap
+from app.ui.cover_loader import CoverLoader
 
 
 class LibraryView(QWidget):
@@ -37,7 +38,16 @@ class LibraryView(QWidget):
         self._active_folder: str = "__ALL__"
         self._last_cols: int = 0
         self._fallback_width: int = 1280
+        self._filtered_books: list[dict] = []
+        self._visible_cards: dict[str, BookCardWidget] = {}
+        self._cover_cards: dict[str, set[BookCardWidget]] = {}
+        self._empty_widget: QWidget | None = None
+        self._layout_dirty = True
+        self._last_grid_key = None
+        self._cover_loader = CoverLoader(parent=self)
+        self._cover_loader.loaded.connect(self._on_cover_loaded)
         self._build_ui()
+        self.scroll.verticalScrollBar().valueChanged.connect(self._update_visible_cards)
 
     def _build_ui(self):
         root_layout = QVBoxLayout(self)
@@ -463,14 +473,16 @@ class LibraryView(QWidget):
             QMenu {
                 background-color: #1E1E2E;
                 color: #CDD6F4;
-                border: 1px solid #45475A;
-                border-radius: 8px;
+                border: 1px solid #313244;
+                border-radius: 10px;
                 padding: 6px;
             }
             QMenu::item {
-                padding: 5px 16px;
+                padding: 6px 14px;
                 min-height: 24px;
-                border-radius: 5px;
+                border-radius: 6px;
+                font-size: 13px;
+                margin: 1px 4px;
             }
             QMenu::item:selected {
                 background-color: #313244;
@@ -480,7 +492,7 @@ class LibraryView(QWidget):
             QMenu::separator {
                 height: 1px;
                 background: #313244;
-                margin: 4px 6px;
+                margin: 5px 6px;
             }
         """)
 
@@ -495,53 +507,86 @@ class LibraryView(QWidget):
         menu.addAction(act_open)
         menu.addSeparator()
 
-        header_act = QAction(svg_icon("folder_open", "#F9E2AF", 14), f"Current: {cur_cat or 'Uncategorized'}", menu)
-        header_act.setEnabled(False)
-        menu.addAction(header_act)
-        menu.addSeparator()
+        # Category Mini Panel
+        cat_panel = QFrame()
+        cat_panel.setObjectName("CategoryMiniPanel")
+        panel_layout = QVBoxLayout(cat_panel)
+        panel_layout.setContentsMargins(8, 6, 8, 6)
+        panel_layout.setSpacing(6)
 
-        category_header = QAction(
-            svg_icon("folder", "#89B4FA", 14),
-            "Assign to Category",
-            menu,
+        header_layout = QHBoxLayout()
+        header_layout.setContentsMargins(2, 2, 2, 2)
+        header_layout.setSpacing(6)
+
+        lbl_title = QLabel("CATEGORIES")
+        lbl_title.setStyleSheet("color: #89B4FA; font-size: 11px; font-weight: 700; letter-spacing: 0.5px;")
+        header_layout.addWidget(lbl_title)
+        header_layout.addStretch()
+
+        cur_badge = QLabel(f"Current: {cur_cat}" if cur_cat else "Uncategorized")
+        cur_badge.setStyleSheet(
+            "background-color: #252538; color: #F9E2AF; font-size: 10px; font-weight: 600; "
+            "padding: 2px 8px; border-radius: 9px; border: 1px solid #36384C;"
+            if cur_cat else
+            "background-color: #181825; color: #9399B2; font-size: 10px; font-weight: 500; "
+            "padding: 2px 8px; border-radius: 9px; border: 1px solid #2A2B3D;"
         )
-        category_header.setEnabled(False)
-        menu.addAction(category_header)
+        header_layout.addWidget(cur_badge)
+        panel_layout.addLayout(header_layout)
 
-        category_list = QListWidget(menu)
+        category_list = QListWidget(cat_panel)
+        category_list.setObjectName("CategoryMiniList")
         category_list.setUniformItemSizes(True)
-        category_list.setFixedSize(260, 5 * 30 + 4)
         category_list.setFocusPolicy(Qt.StrongFocus)
+        category_list.setCursor(Qt.PointingHandCursor)
+        category_list.setTextElideMode(Qt.ElideRight)
         category_list.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
         category_list.setVerticalScrollBarPolicy(Qt.ScrollBarAsNeeded)
-        category_list.setStyleSheet("""
-            QListWidget {
-                background: #1E1E2E;
+
+        folder_count = len(self._folders_list)
+        if folder_count > 5:
+            row_count = 4.5  # View showing 4 to 5 categories with smooth scroll indicator
+        elif folder_count == 5:
+            row_count = 5.0
+        else:
+            row_count = 4.0
+        category_list.setFixedHeight(int(row_count * 28) + 4)
+        category_list.setFixedWidth(270)
+        cat_panel.setStyleSheet("""
+            QFrame#CategoryMiniPanel {
+                background-color: #181825;
+                border: 1px solid #313244;
+                border-radius: 8px;
+                margin: 2px 4px;
+            }
+            QListWidget#CategoryMiniList {
+                background: transparent;
                 color: #CDD6F4;
-                border: 1px solid #45475A;
-                border-radius: 6px;
-                padding: 2px;
+                border: none;
+                padding: 0px;
                 outline: none;
             }
-            QListWidget::item {
-                min-height: 28px;
+            QListWidget#CategoryMiniList::item {
+                min-height: 26px;
                 padding: 3px 8px;
-                border-radius: 4px;
+                border-radius: 5px;
+                font-size: 12px;
+                margin-bottom: 2px;
             }
-            QListWidget::item:hover {
-                background: #313244;
+            QListWidget#CategoryMiniList::item:hover {
+                background-color: #313244;
                 color: #89B4FA;
             }
             QScrollBar:vertical {
                 background: #11111B;
-                width: 8px;
+                width: 6px;
                 margin: 2px;
-                border-radius: 4px;
+                border-radius: 3px;
             }
             QScrollBar::handle:vertical {
-                background: #585B70;
-                min-height: 24px;
-                border-radius: 4px;
+                background: #45475A;
+                min-height: 20px;
+                border-radius: 3px;
             }
             QScrollBar::handle:vertical:hover {
                 background: #89B4FA;
@@ -550,17 +595,28 @@ class LibraryView(QWidget):
                 height: 0;
             }
         """)
-        for f_name in self._folders_list:
-            is_cur = f_name == cur_cat
-            item = QListWidgetItem(
-                svg_icon("check", "#A6E3A1", 14)
-                if is_cur
-                else svg_icon("folder", "#89B4FA", 14),
-                f"Assign to '{f_name}'",
+
+        if not self._folders_list:
+            empty_item = QListWidgetItem(
+                svg_icon("info", "#6C7086", 13),
+                "No categories yet",
             )
-            item.setData(Qt.UserRole, f_name)
-            item.setFlags(item.flags() & ~Qt.ItemIsEnabled if is_cur else item.flags())
-            category_list.addItem(item)
+            empty_item.setFlags(Qt.NoItemFlags)
+            empty_item.setData(Qt.UserRole, "")
+            category_list.addItem(empty_item)
+        else:
+            for f_name in self._folders_list:
+                is_cur = f_name == cur_cat
+                label = f"{f_name}  ✓" if is_cur else f_name
+                icon = (
+                    svg_icon("check", "#A6E3A1", 13)
+                    if is_cur
+                    else svg_icon("folder", "#89B4FA", 13)
+                )
+                item = QListWidgetItem(icon, label)
+                item.setData(Qt.UserRole, f_name)
+                item.setToolTip(f"Currently in '{f_name}'" if is_cur else f"Move to '{f_name}'")
+                category_list.addItem(item)
 
         def assign_category(item: QListWidgetItem):
             folder_name = item.data(Qt.UserRole)
@@ -568,9 +624,10 @@ class LibraryView(QWidget):
                 self._execute_move_book(book_path, folder_name)
             menu.close()
 
+        panel_layout.addWidget(category_list)
         category_list.itemClicked.connect(assign_category)
         category_action = QWidgetAction(menu)
-        category_action.setDefaultWidget(category_list)
+        category_action.setDefaultWidget(cat_panel)
         menu.addAction(category_action)
 
         if cur_cat:
@@ -587,7 +644,7 @@ class LibraryView(QWidget):
         menu.addSeparator()
         act_new_move = QAction(
             svg_icon("folder_plus", "#A6E3A1", 14),
-            "New Category & Assign Here...",
+            "New Category && Assign Here...",
             menu,
         )
         act_new_move.triggered.connect(
@@ -842,19 +899,42 @@ class LibraryView(QWidget):
 
     def _rebuild_grid(self, force: bool = False):
         cols = self._compute_columns()
-        if not force and cols == self._last_cols and self._books_cache:
+        filtered = self._get_filtered_sorted_books()
+        filter_key = (
+            self.search_input.text().strip().lower(),
+            self.combo_format.currentText(),
+            self.combo_status.currentText(),
+            self.combo_sort.currentText(),
+            self._active_folder,
+            cols,
+            tuple(book.get("path", "") for book in filtered),
+        )
+        if force and filter_key == self._last_grid_key:
             return
+        if not force and cols == self._last_cols and self._books_cache:
+            self._update_visible_cards()
+            return
+        self._last_grid_key = filter_key
+        columns_changed = cols != self._last_cols
         self._last_cols = cols
 
-        while self.grid_layout.count():
-            item = self.grid_layout.takeAt(0)
-            if item.widget():
-                item.widget().deleteLater()
+        if self._empty_widget is not None:
+            self.grid_layout.removeWidget(self._empty_widget)
+            self._empty_widget.deleteLater()
+            self._empty_widget = None
+        if columns_changed or force:
+            while self.grid_layout.count():
+                item = self.grid_layout.takeAt(0)
+                if item.widget():
+                    item.widget().deleteLater()
+            self._visible_cards.clear()
+            self._cover_cards.clear()
+        self._layout_dirty = True
 
         for c in range(max(cols, 4)):
             self.grid_layout.setColumnStretch(c, 0)
 
-        filtered = self._get_filtered_sorted_books()
+        self._filtered_books = filtered
         total_count = len(self._books_cache)
         shown_count = len(filtered)
 
@@ -868,13 +948,45 @@ class LibraryView(QWidget):
             empty_widget = self._create_empty_state_widget(
                 is_library_totally_empty=(total_count == 0)
             )
-            self.grid_layout.addWidget(empty_widget, 0, 0)
+            self._empty_widget = empty_widget
+            self.grid_layout.addWidget(self._empty_widget, 0, 0)
             return
 
         self.grid_layout.setAlignment(Qt.AlignTop | Qt.AlignHCenter)
         for idx, book in enumerate(filtered):
+            path = book.get("path", "")
+            if not path:
+                continue
             card = BookCardWidget(book)
             card.clicked.connect(self.book_selected.emit)
             card.remove_requested.connect(self.book_remove_requested.emit)
             card.folder_menu_requested.connect(self._show_book_folder_menu)
+            self._visible_cards[path] = card
             self.grid_layout.addWidget(card, idx // cols, idx % cols)
+            cover_path = (
+                book.get("cover_path")
+                or book.get("cover_image")
+                or book.get("cover")
+                or ""
+            )
+            if cover_path:
+                self._cover_cards.setdefault(cover_path, set()).add(card)
+                self._cover_loader.request(cover_path)
+        rows = (len(filtered) + cols - 1) // cols
+        margins = self.grid_layout.contentsMargins()
+        self.grid_container.setMinimumHeight(
+            rows * (346 + self.GRID_SPACING) + margins.top() + margins.bottom()
+        )
+
+    def _update_visible_cards(self):
+        # Cards are intentionally kept in the layout so QScrollArea has
+        # deterministic row geometry while covers load asynchronously.
+        return
+
+    def _on_cover_loaded(self, path: str, image):
+        for card in self._cover_cards.get(path, ()):
+            card.set_cover_image(image)
+
+    def closeEvent(self, event):
+        self._cover_loader.close()
+        super().closeEvent(event)

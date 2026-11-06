@@ -31,6 +31,7 @@ class LibraryStore:
         self.covers_dir = COVERS_CACHE_DIR
         self.books = self._load()
         self.settings = self._load_settings()
+        self._last_saved_books = json.dumps(self.books, sort_keys=True, separators=(",", ":"))
 
     def _load(self) -> dict:
         if self.db_file.exists():
@@ -56,7 +57,11 @@ class LibraryStore:
 
     def save(self):
         try:
+            compact = json.dumps(self.books, sort_keys=True, separators=(",", ":"))
+            if compact == self._last_saved_books and self.db_file.exists():
+                return
             self._atomic_write_text(self.db_file, json.dumps(self.books, indent=2))
+            self._last_saved_books = compact
         except OSError:
             pass
 
@@ -227,6 +232,7 @@ class LibraryStore:
         filepath: str,
         open_doc: pymupdf.Document | None = None,
         autosave: bool = True,
+        generate_cover: bool = True,
     ) -> dict | None:
         filepath = os.path.abspath(filepath)
         if not os.path.exists(filepath):
@@ -258,7 +264,7 @@ class LibraryStore:
             needs_cover_upgrade = (
                 Path(filepath).suffix.lower() == ".epub" and not existing.get("cover_v2", False)
             )
-            if (not cover_path.exists() or needs_cover_upgrade) and total_pages > 0:
+            if generate_cover and (not cover_path.exists() or needs_cover_upgrade) and total_pages > 0:
                 self._generate_cover(filepath, doc, cover_path)
         finally:
             if should_close:
@@ -301,6 +307,28 @@ class LibraryStore:
         if autosave:
             self.save()
         return record
+
+    def generate_cover_for_book(self, filepath: str) -> bool:
+        """Generate one missing cover after bulk import without changing metadata."""
+        bid = self.book_id(filepath)
+        book = self.books.get(bid)
+        if not book or not os.path.exists(filepath):
+            return False
+        cover_path = self.covers_dir / f"{bid}.png"
+        if cover_path.exists() and book.get("cover_v2", False):
+            return False
+        try:
+            doc = open_clean_document(filepath, fontsize=DEFAULT_EPUB_FONTSIZE)
+        except Exception:
+            return False
+        try:
+            self._generate_cover(filepath, doc, cover_path)
+        finally:
+            doc.close()
+        book["cover_v2"] = cover_path.exists()
+        book["cover_version"] = 4 if cover_path.exists() else 0
+        book["cover"] = str(cover_path)
+        return cover_path.exists()
 
     def refresh_epub_covers_once(self):
         """Upgrades any existing EPUB book cards that still have old v1 white-box covers."""

@@ -3,7 +3,8 @@ import pymupdf
 from PySide6.QtCore import Qt, Signal, QTimer, QPoint, QPointF, QSize, QEvent
 from PySide6.QtGui import QColor, QKeySequence, QShortcut
 from PySide6.QtWidgets import (
-    QWidget, QVBoxLayout, QHBoxLayout, QSplitter, QTabWidget,
+    QWidget, QVBoxLayout, QHBoxLayout, QSplitter, QStackedWidget,
+    QButtonGroup,
     QTreeWidget, QTreeWidgetItem, QListWidget, QListWidgetItem,
     QFrame, QLabel, QComboBox, QPushButton, QLineEdit, QSlider,
     QMenu, QFileDialog, QMessageBox, QCheckBox
@@ -179,9 +180,116 @@ class ReaderView(QWidget):
         # ---- MAIN SPLITTER: SIDEBAR + DOCUMENT CANVAS ----
         self.splitter = QSplitter(Qt.Horizontal)
 
-        self.sidebar_tabs = QTabWidget()
+        self.sidebar_tabs = QWidget()
         self.sidebar_tabs.setMinimumWidth(280)
         self.sidebar_tabs.setMaximumWidth(380)
+        sidebar_layout = QVBoxLayout(self.sidebar_tabs)
+        sidebar_layout.setContentsMargins(6, 6, 6, 6)
+        sidebar_layout.setSpacing(6)
+
+        sidebar_nav = QFrame()
+        sidebar_nav.setObjectName("SidebarNavigation")
+        nav_layout = QHBoxLayout(sidebar_nav)
+        nav_layout.setContentsMargins(0, 0, 0, 0)
+        nav_layout.setSpacing(0)
+        nav_style = """
+            QFrame#SidebarNavigation {
+                background-color: transparent;
+                border: 1px solid #313244;
+                border-radius: 6px;
+            }
+            QFrame#SidebarNavigation QPushButton {
+                background-color: #1E1E2E;
+                color: #A6ADC8;
+                border: none;
+                border-right: 1px solid #313244;
+                padding: 0px;
+                margin: 0px;
+                min-height: 34px;
+                max-height: 34px;
+                outline: none;
+            }
+            QFrame#SidebarNavigation QPushButton:hover {
+                background-color: #2A2B3D;
+                color: #CDD6F4;
+            }
+            QFrame#SidebarNavigation QPushButton:pressed {
+                background-color: #181825;
+            }
+            QFrame#SidebarNavigation QPushButton:checked {
+                background-color: #11111B;
+                color: #89B4FA;
+            }
+            QFrame#SidebarNavigation QPushButton#SidebarNavFirst {
+                border-top-left-radius: 5px;
+                border-bottom-left-radius: 5px;
+            }
+            QFrame#SidebarNavigation QPushButton#SidebarNavMiddle {
+                border-radius: 0px;
+            }
+            QFrame#SidebarNavigation QPushButton#SidebarNavLast {
+                border-right: none;
+                border-top-right-radius: 5px;
+                border-bottom-right-radius: 5px;
+            }
+        """
+        sidebar_nav.setStyleSheet(nav_style)
+        self.sidebar_pages = QStackedWidget()
+        self.sidebar_pages.setObjectName("SidebarPages")
+        self.sidebar_pages.setStyleSheet(
+            "QStackedWidget#SidebarPages {"
+            " background-color: #181825;"
+            " border: 1px solid #313244;"
+            " border-radius: 6px;"
+            "}"
+        )
+        self.sidebar_button_group = QButtonGroup(self)
+        self.sidebar_button_group.setExclusive(True)
+
+        def add_sidebar_button(label, icon_name, tooltip, index, total_count=4):
+            button = QPushButton()
+            if index == 0:
+                button.setObjectName("SidebarNavFirst")
+            elif index == total_count - 1:
+                button.setObjectName("SidebarNavLast")
+            else:
+                button.setObjectName("SidebarNavMiddle")
+            button.setCheckable(True)
+            button.setIcon(svg_icon(icon_name, "#89B4FA" if index == 0 else "#A6ADC8", 17))
+            button.setIconSize(QSize(17, 17))
+            button.setToolTip(tooltip)
+            button.setAccessibleName(label)
+            button.setAccessibleDescription(tooltip)
+            button.setCursor(Qt.PointingHandCursor)
+            button.toggled.connect(
+                lambda checked, target=button, name=icon_name: target.setIcon(
+                    svg_icon(name, "#89B4FA" if checked else "#A6ADC8", 17)
+                )
+            )
+            self.sidebar_button_group.addButton(button, index)
+            nav_layout.addWidget(button, 1)
+            return button
+
+        self.btn_sidebar_contents = add_sidebar_button(
+            "Contents", "list", "Show table of contents", 0
+        )
+        self.btn_sidebar_bookmarks = add_sidebar_button(
+            "Bookmarks", "bookmark", "Show bookmarks", 1
+        )
+        self.btn_sidebar_highlights = add_sidebar_button(
+            "Highlights", "message_square", "Show highlights and notes", 2
+        )
+        self.btn_sidebar_search = add_sidebar_button(
+            "Search", "search", "Show search results", 3
+        )
+        self.sidebar_button_group.idClicked.connect(self.sidebar_pages.setCurrentIndex)
+        self.sidebar_pages.currentChanged.connect(
+            lambda idx: self.sidebar_button_group.button(idx).setChecked(True)
+            if self.sidebar_button_group.button(idx) else None
+        )
+        self.btn_sidebar_contents.setChecked(True)
+        sidebar_layout.addWidget(sidebar_nav)
+        sidebar_layout.addWidget(self.sidebar_pages, stretch=1)
 
         self.toc_tree = QTreeWidget()
         self.toc_tree.setHeaderHidden(True)
@@ -205,11 +313,11 @@ class ReaderView(QWidget):
         )
         self.toc_tree.itemClicked.connect(self._on_toc_clicked)
         self.toc_tree.viewport().installEventFilter(self)
-        self.sidebar_tabs.addTab(self.toc_tree, "Contents")
+        self.sidebar_pages.addWidget(self.toc_tree)
 
         self.bookmarks_list = QListWidget()
         self.bookmarks_list.itemClicked.connect(self._on_bookmark_clicked)
-        self.sidebar_tabs.addTab(self.bookmarks_list, "Bookmarks")
+        self.sidebar_pages.addWidget(self.bookmarks_list)
 
         # Highlights Tab with bottom "Export to Markdown (.md)" button
         hl_tab = QWidget()
@@ -230,11 +338,11 @@ class ReaderView(QWidget):
         btn_export_md.clicked.connect(self.export_annotations_markdown)
         hl_layout.addWidget(btn_export_md)
 
-        self.sidebar_tabs.addTab(hl_tab, "Highlights")
+        self.sidebar_pages.addWidget(hl_tab)
 
         self.search_list = QListWidget()
         self.search_list.itemClicked.connect(self._on_search_result_clicked)
-        self.sidebar_tabs.addTab(self.search_list, "Search")
+        self.sidebar_pages.addWidget(self.search_list)
 
         self.splitter.addWidget(self.sidebar_tabs)
 
@@ -611,7 +719,7 @@ class ReaderView(QWidget):
             # (the same match the old blocking search picked), then leave the view alone.
             if not self._search_focused and first_forward is not None:
                 self._search_focused = True
-                self.sidebar_tabs.setCurrentWidget(self.search_list)
+                self.sidebar_pages.setCurrentWidget(self.search_list)
                 self._focus_search_match(first_forward, self._search_matches_by_page)
             else:
                 self._refresh_search_overlays()
@@ -630,7 +738,7 @@ class ReaderView(QWidget):
             if not self._search_focused:
                 # Every match is before the current page: wrap around to the first one.
                 self._search_focused = True
-                self.sidebar_tabs.setCurrentWidget(self.search_list)
+                self.sidebar_pages.setCurrentWidget(self.search_list)
                 self._focus_search_match(0, self._search_matches_by_page)
             else:
                 self._update_search_label()

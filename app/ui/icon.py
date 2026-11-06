@@ -2,6 +2,7 @@ from pathlib import Path
 from PySide6.QtCore import Qt, QByteArray, QRectF
 from PySide6.QtGui import QIcon, QPixmap, QPainter, QGuiApplication
 from PySide6.QtSvg import QSvgRenderer
+from functools import lru_cache
 
 PROJECT_ROOT = Path(__file__).resolve().parent.parent.parent
 APP_ICON_PATH = PROJECT_ROOT / "images" / "app_icon.png"
@@ -114,6 +115,29 @@ SVG_PATHS: dict[str, str] = {
         '<polyline points="2 17 12 22 22 17"/>'
         '<polyline points="2 12 12 17 22 12"/>'
     ),
+    "list": (
+        '<line x1="8" y1="6" x2="21" y2="6"/>'
+        '<line x1="8" y1="12" x2="21" y2="12"/>'
+        '<line x1="8" y1="18" x2="21" y2="18"/>'
+        '<line x1="3" y1="6" x2="3.01" y2="6"/>'
+        '<line x1="3" y1="12" x2="3.01" y2="12"/>'
+        '<line x1="3" y1="18" x2="3.01" y2="18"/>'
+    ),
+    "message_square": (
+        '<path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z"/>'
+        '<line x1="8" y1="9" x2="16" y2="9"/>'
+        '<line x1="8" y1="13" x2="14" y2="13"/>'
+    ),
+    "book_marked": (
+        '<path d="M4 19.5v-15A2.5 2.5 0 0 1 6.5 2H20v20H6.5a2.5 2.5 0 0 1-2.5-2.5Z"/>'
+        '<polyline points="10 2 10 10 13 7 16 10 16 2"/>'
+    ),
+    "layout_grid": (
+        '<rect x="3" y="3" width="7" height="7" rx="1"/>'
+        '<rect x="14" y="3" width="7" height="7" rx="1"/>'
+        '<rect x="14" y="14" width="7" height="7" rx="1"/>'
+        '<rect x="3" y="14" width="7" height="7" rx="1"/>'
+    ),
 }
 
 
@@ -124,31 +148,32 @@ def _ensure_gui_app():
         QGuiApplication([sys.argv[0] if sys.argv else "local-library", "-platform", "offscreen"])
 
 
-def svg_pixmap(name: str, color: str = "#CDD6F4", size: int = 16, stroke_width: float = 2.0) -> QPixmap:
-    """Renders a named vector SVG icon into a crisp HiDPI QPixmap."""
-    _ensure_gui_app()
+@lru_cache(maxsize=256)
+def _svg_pixmap_cached(name: str, color: str, size: int, stroke_width: float, dpr: float) -> QPixmap:
     inner = SVG_PATHS.get(name, SVG_PATHS["book_open"])
     svg_xml = (
         f'<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" '
         f'fill="none" stroke="{color}" stroke-width="{stroke_width}" '
         f'stroke-linecap="round" stroke-linejoin="round">{inner}</svg>'
     ).encode("utf-8")
-
-    app = QGuiApplication.instance()
-    dpr = app.primaryScreen().devicePixelRatio() if app and app.primaryScreen() else 1.0
     px_size = max(1, int(round(size * dpr)))
-
     pixmap = QPixmap(px_size, px_size)
     pixmap.fill(Qt.transparent)
-
     renderer = QSvgRenderer(QByteArray(svg_xml))
     painter = QPainter(pixmap)
     painter.setRenderHint(QPainter.Antialiasing, True)
     renderer.render(painter, QRectF(0, 0, px_size, px_size))
     painter.end()
-
     pixmap.setDevicePixelRatio(dpr)
     return pixmap
+
+
+def svg_pixmap(name: str, color: str = "#CDD6F4", size: int = 16, stroke_width: float = 2.0) -> QPixmap:
+    """Renders a named vector SVG icon into a crisp HiDPI QPixmap."""
+    _ensure_gui_app()
+    app = QGuiApplication.instance()
+    dpr = app.primaryScreen().devicePixelRatio() if app and app.primaryScreen() else 1.0
+    return _svg_pixmap_cached(name, color, size, stroke_width, dpr)
 
 
 def svg_icon(name: str, color: str = "#CDD6F4", size: int = 16, stroke_width: float = 2.0) -> QIcon:

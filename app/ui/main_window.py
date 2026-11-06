@@ -1,6 +1,6 @@
 import os
 from pathlib import Path
-from PySide6.QtCore import Qt, QSize, QUrl
+from PySide6.QtCore import Qt, QSize, QUrl, QTimer
 from PySide6.QtGui import QKeySequence, QShortcut
 from PySide6.QtWidgets import (
     QMainWindow,
@@ -28,6 +28,7 @@ from app.core.store import LibraryStore
 from app.ui.icon import get_app_icon, svg_icon
 from app.ui.library_view import LibraryView
 from app.ui.reader_view import ReaderView
+from app.core.performance import measure
 
 
 class LocalLibraryWindow(QMainWindow):
@@ -45,7 +46,9 @@ class LocalLibraryWindow(QMainWindow):
 
         self._build_ui()
         self._setup_shortcuts()
+        self._cover_generation_timer: QTimer | None = None
         self.show_library_view()
+        QTimer.singleShot(0, self._deferred_startup_tasks)
 
     @property
     def reader_view(self) -> ReaderView | None:
@@ -243,9 +246,38 @@ class LocalLibraryWindow(QMainWindow):
         self.stack = QStackedWidget()
         self.library_view = LibraryView()
         self.reader_tabs = QTabWidget()
+        self.reader_tabs.setObjectName("ReaderFileTabs")
         self.reader_tabs.setTabsClosable(True)
         self.reader_tabs.setDocumentMode(True)
         self.reader_tabs.setMovable(True)
+        self.reader_tabs.setElideMode(Qt.ElideRight)
+        self.reader_tabs.tabBar().setExpanding(False)
+        self.reader_tabs.tabBar().setUsesScrollButtons(True)
+        self.reader_tabs.setStyleSheet("""
+            QTabWidget#ReaderFileTabs {
+                background-color: #11111B;
+            }
+            QTabWidget#ReaderFileTabs QTabBar::tab {
+                background-color: #11111B;
+                color: #A6ADC8;
+                min-width: 220px;
+                max-width: 220px;
+                padding: 8px 8px;
+                border-top-left-radius: 6px;
+                border-top-right-radius: 6px;
+                font-weight: 600;
+                margin-right: 2px;
+            }
+            QTabWidget#ReaderFileTabs QTabBar::tab:hover {
+                background-color: #1E1E2E;
+                color: #CDD6F4;
+            }
+            QTabWidget#ReaderFileTabs QTabBar::tab:selected {
+                background-color: #181825;
+                color: #89B4FA;
+                border-bottom: 2px solid #89B4FA;
+            }
+        """)
         self.reader_tabs.tabCloseRequested.connect(self._close_reader_tab)
         self.reader_tabs.currentChanged.connect(self._on_reader_tab_changed)
 
@@ -321,6 +353,13 @@ class LocalLibraryWindow(QMainWindow):
 
     def _on_reader_tab_changed(self, index: int):
         reader = self.reader_view
+        if self.stack.currentWidget() is not self.reader_tabs:
+            return
+        for tab_index in range(self.reader_tabs.count()):
+            other = self.reader_tabs.widget(tab_index)
+            if isinstance(other, ReaderView) and other is not reader:
+                other.canvas.release_cache()
+                other.stop_tts()
         if reader is None:
             self.lbl_page_status.clear()
             return
@@ -383,21 +422,28 @@ class LocalLibraryWindow(QMainWindow):
     # ---- VIEW SWITCHING ----
 
     def _refresh_library_grid(self):
-        self.library_view.populate(
-            self.store.books,
-            self.width(),
-            folders=self.store.get_folders(),
-        )
+        with measure("library refresh"):
+            self.library_view.populate(
+                self.store.books,
+                self.width(),
+                folders=self.store.get_folders(),
+            )
+
+    def _deferred_startup_tasks(self):
+        """Run maintenance after the first library frame is visible."""
+        if self.stack.currentWidget() is not self.library_view:
+            return
+        self.store.refresh_epub_covers_once()
 
     def show_library_view(self):
         self.lbl_page_status.setText("")
         self._set_reader_controls_visible(False)
         self._set_library_controls_visible(True)
         self.setWindowTitle("Linux eBook & PDF Reader — LocalLibrary")
-        if hasattr(self.store, "refresh_epub_covers_once"):
-            self.store.refresh_epub_covers_once()
+        self.stack.setCurrentWidget(self.library_view)
+        self.library_view.setVisible(True)
+        self.reader_tabs.setVisible(False)
         self._refresh_library_grid()
-        self.stack.setCurrentIndex(0)
 
     def open_book(self, filepath: str):
         if not filepath or not os.path.exists(filepath):
@@ -414,7 +460,9 @@ class LocalLibraryWindow(QMainWindow):
             if isinstance(reader, ReaderView) and reader.current_book:
                 if os.path.abspath(reader.current_book.get("path", "")) == normalized_path:
                     self.reader_tabs.setCurrentIndex(index)
-                    self.stack.setCurrentIndex(1)
+                    self.stack.setCurrentWidget(self.reader_tabs)
+                    self.library_view.setVisible(False)
+                    self.reader_tabs.setVisible(True)
                     return
 
         self._set_library_controls_visible(False)
@@ -429,7 +477,9 @@ class LocalLibraryWindow(QMainWindow):
         self._install_tab_close_button(reader)
         self.reader_tabs.setCurrentIndex(tab_index)
 
-        self.stack.setCurrentIndex(1)
+        self.stack.setCurrentWidget(self.reader_tabs)
+        self.library_view.setVisible(False)
+        self.reader_tabs.setVisible(True)
         ok = reader.load_book(filepath)
         if not ok:
             self._close_reader_tab(tab_index)
@@ -596,19 +646,27 @@ class LocalLibraryWindow(QMainWindow):
         progress.show()
         QApplication.processEvents()
         added = 0
+        imported_paths: list[str] = []
         for index, fpath in enumerate(files, 1):
             if progress.wasCanceled():
                 break
             if Path(fpath).suffix.lower() in SUPPORTED_EXTENSIONS:
-                self.store.add_or_update_book(fpath)
-                added += 1
+                with measure("bulk metadata import"):
+                    record = self.store.add_or_update_book(
+                        fpath, autosave=False, generate_cover=False
+                    )
+                if record is not None:
+                    added += 1
+                    imported_paths.append(fpath)
             progress.setValue(index)
             progress.setLabelText(f"Loading book {index} of {len(files)}...")
             QApplication.processEvents()
+        self.store.save()
         progress.close()
         if added:
             self._refresh_library_grid()
-            self.open_books(files)
+            self.open_books(imported_paths)
+            self._queue_cover_generation(imported_paths)
 
     def import_multiple_folders_dialog(self):
         dialog = QFileDialog(self, "Select Folder to Scan for Books", str(Path.home()))
@@ -638,22 +696,58 @@ class LocalLibraryWindow(QMainWindow):
         progress.show()
         QApplication.processEvents()
         added = 0
+        imported_paths: list[str] = []
         for index, full_path in enumerate(book_paths, 1):
             if progress.wasCanceled():
                 break
-            self.store.add_or_update_book(full_path)
-            added += 1
+            with measure("bulk metadata import"):
+                record = self.store.add_or_update_book(
+                    full_path, autosave=False, generate_cover=False
+                )
+            if record is not None:
+                added += 1
+                imported_paths.append(full_path)
             progress.setValue(index)
             progress.setLabelText(f"Loading book {index} of {len(book_paths)}...")
             QApplication.processEvents()
+        self.store.save()
         progress.close()
 
         self._refresh_library_grid()
+        self._queue_cover_generation(imported_paths)
         QMessageBox.information(
             self,
             "Folder Import Complete",
             f"Scanned '{folder}' and imported/updated {added} book(s).",
         )
+
+    def _queue_cover_generation(self, paths: list[str]):
+        if self._cover_generation_timer is not None:
+            self._cover_generation_timer.stop()
+        pending_paths = [
+            path for path in dict.fromkeys(paths)
+            if self.store.book_id(path) in self.store.books
+        ]
+        if not pending_paths:
+            return
+        pending = iter(pending_paths)
+
+        def generate_next():
+            try:
+                path = next(pending)
+            except StopIteration:
+                self.store.save()
+                self._refresh_library_grid()
+                self._cover_generation_timer = None
+                return
+            with measure("cover generation"):
+                self.store.generate_cover_for_book(path)
+            self._cover_generation_timer.start(0)
+
+        self._cover_generation_timer = QTimer(self)
+        self._cover_generation_timer.setSingleShot(True)
+        self._cover_generation_timer.timeout.connect(generate_next)
+        self._cover_generation_timer.start(0)
 
     def remove_book_from_library(self, filepath: str):
         book = self.store.books.get(self.store.book_id(filepath)) or {}
@@ -671,6 +765,10 @@ class LocalLibraryWindow(QMainWindow):
             self._refresh_library_grid()
 
     def closeEvent(self, event):
+        if self._cover_generation_timer is not None:
+            self._cover_generation_timer.stop()
+            self._cover_generation_timer.deleteLater()
+            self._cover_generation_timer = None
         for index in range(self.reader_tabs.count()):
             reader = self.reader_tabs.widget(index)
             if isinstance(reader, ReaderView):

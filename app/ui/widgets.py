@@ -1,4 +1,5 @@
 import os
+from collections import OrderedDict
 import math
 import bisect
 import webbrowser
@@ -145,7 +146,8 @@ class DocumentCanvasView(QAbstractScrollArea):
         self.max_width: int = 0
         self.current_page: int = 0
 
-        self._pixmap_cache: dict[int, tuple[float, QPixmap]] = {}
+        self._pixmap_cache: OrderedDict[int, tuple[float, QPixmap]] = OrderedDict()
+        self._pixmap_cache_limit = 24
         self._words_cache: dict[int, list] = {}
         self._links_cache: dict[int, list] = {}
 
@@ -250,7 +252,6 @@ class DocumentCanvasView(QAbstractScrollArea):
             self._recalculate_layout()
             self.viewport().update()
             return
-
         is_reflow = self.doc.is_reflowable
         for i in range(len(self.doc)):
             if is_reflow:
@@ -260,6 +261,13 @@ class DocumentCanvasView(QAbstractScrollArea):
                 self.base_sizes.append((float(r.width), float(r.height)))
 
         self._recalculate_layout()
+        self.viewport().update()
+
+    def release_cache(self):
+        """Release rendered page memory while retaining the open document and position."""
+        self._pixmap_cache.clear()
+        self._words_cache.clear()
+        self._links_cache.clear()
         self.viewport().update()
     
     def set_zoom(self, new_zoom: float):
@@ -1004,6 +1012,8 @@ class DocumentCanvasView(QAbstractScrollArea):
         for p in candidates:
             if 0 <= p < len(self.doc) and p not in self._pixmap_cache:
                 self._pixmap_cache[p] = (self.zoom, self._render_page_pixmap(p, dpr))
+                self._pixmap_cache.move_to_end(p)
+                self._trim_pixmap_cache()
                 # Render one page per idle tick so the UI event loop stays responsive.
                 self._prefetch_timer.start()
                 break
@@ -1043,8 +1053,11 @@ class DocumentCanvasView(QAbstractScrollArea):
                     continue
                 pix = self._render_page_pixmap(i, dpr)
                 self._pixmap_cache[i] = (self.zoom, pix)
+                self._pixmap_cache.move_to_end(i)
+                self._trim_pixmap_cache()
             else:
                 pix = cached[1]
+                self._pixmap_cache.move_to_end(i)
 
             painter.save()
             painter.setClipRect(target_rect)
@@ -1105,6 +1118,10 @@ class DocumentCanvasView(QAbstractScrollArea):
     def invalidate_page(self, page_index: int):
         self._pixmap_cache.pop(page_index, None)
         self.viewport().update()
+
+    def _trim_pixmap_cache(self):
+        while len(self._pixmap_cache) > self._pixmap_cache_limit:
+            self._pixmap_cache.popitem(last=False)
 
     def invalidate_all(self):
         self._pixmap_cache.clear()
@@ -1296,6 +1313,8 @@ class DocumentCanvasView(QAbstractScrollArea):
         screen = QApplication.primaryScreen()
         dpr = min(1.25, max(1.0, screen.devicePixelRatio() if screen else 1.0))
         self._pixmap_cache[p] = (self.zoom, self._render_page_pixmap(p, dpr))
+        self._pixmap_cache.move_to_end(p)
+        self._trim_pixmap_cache()
         self.viewport().update()
         if len(stale) > 1:
             self._sharp_chain.start()
@@ -1562,25 +1581,8 @@ class BookCardWidget(QFrame):
             "background-color: #11111B; border: 1px solid #232436; border-radius: 8px;"
         )
 
-        cover_path = (
-            book.get("cover_path")
-            or book.get("cover_image")
-            or book.get("cover")
-            or ""
-        )
-        pix_loaded = False
-        if cover_path and os.path.exists(cover_path):
-            pix = QPixmap(cover_path)
-            if not pix.isNull():
-                scaled_pix = pix.scaled(
-                    190, 206, Qt.KeepAspectRatio, Qt.SmoothTransformation
-                )
-                cover_lbl.setPixmap(scaled_pix)
-                pix_loaded = True
-
-        if not pix_loaded:
-            cover_lbl.setPixmap(svg_pixmap("book_open", color="#45475A", size=42))
-
+        cover_lbl.setPixmap(svg_pixmap("book_open", color="#45475A", size=42))
+        self.cover_label = cover_lbl
         layout.addWidget(cover_lbl, alignment=Qt.AlignCenter)
 
         # Title
@@ -1642,6 +1644,10 @@ class BookCardWidget(QFrame):
         prog_row.addStretch(1)
         prog_row.addWidget(pct_lbl)
         layout.addLayout(prog_row)
+
+    def set_cover_image(self, image):
+        if image is not None and not image.isNull():
+            self.cover_label.setPixmap(QPixmap.fromImage(image))
 
     def _on_folder_btn_clicked(self):
         global_pos = self.btn_folder.mapToGlobal(
